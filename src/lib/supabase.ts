@@ -298,29 +298,6 @@ class MockSupabaseService {
     return providers[index];
   }
 
-  async loginAsMock(phone: string, fullName: string, role: "client" | "provider" | "admin", onboardingCompleted: boolean): Promise<UserProfile> {
-    const users = this.getUsers();
-    let user = users.find((u) => u.phone === phone);
-    if (!user) {
-      user = {
-        id: `u_${Date.now()}`,
-        role,
-        fullName,
-        phone,
-        preferredLanguage: "fr",
-        onboarding_completed: onboardingCompleted,
-      };
-      users.push(user);
-    } else {
-      user.role = role;
-      user.fullName = fullName;
-      user.onboarding_completed = onboardingCompleted;
-    }
-    this.saveUsers(users);
-    localStorage.setItem(this.currentUserIdKey, user.id);
-    return user;
-  }
-
   async compressAndUpload(file: File, bucket: string): Promise<string> {
     const compressedBase64 = await this.compressImage(file);
     console.log(`[One Village SIMULATED STORAGE] Uploaded to bucket ${bucket}: ${file.name}`);
@@ -378,10 +355,6 @@ export const supabaseService = {
 
   logout() {
     mockSupabase.logout();
-  },
-
-  async loginAsMock(phone: string, fullName: string, role: "client" | "provider" | "admin", onboardingCompleted: boolean): Promise<UserProfile> {
-    return mockSupabase.loginAsMock(phone, fullName, role, onboardingCompleted);
   },
 
   async verifyProvider(id: string, approve: boolean, rejectionReason?: string): Promise<ServiceProvider> {
