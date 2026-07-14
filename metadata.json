@@ -1,0 +1,6 @@
+{
+  "name": "One Village",
+  "description": "Community Services Marketplace for Bertoua & the East Region of Cameroon with Multilingual AI Guide and Mobile Money.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
