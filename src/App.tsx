@@ -41,8 +41,6 @@ import {
   XCircle,
   HelpCircle,
   RefreshCw,
-  Phone,
-  Mail,
   Send,
   AlertTriangle,
 } from "lucide-react";
@@ -55,19 +53,16 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTab, setAuthTab] = useState<"signin" | "signup">("signin");
-  const [authMethod, setAuthMethod] = useState<"phone" | "email">("phone");
-  
+
   // Sign In / Sign Up form states
+  const [authRole, setAuthRole] = useState<"client" | "provider">("client");
   const [authName, setAuthName] = useState("");
   const [authPhone, setAuthPhone] = useState("");
   const [authEmail, setAuthEmail] = useState("");
-  const [otpCode, setOtpCode] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [authPassword, setAuthPassword] = useState("");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
-
-  // Simulated OTP Toast display
-  const [simulatedCode, setSimulatedCode] = useState<string | null>(null);
 
   // Intended action storage for authentication funnel
   const [pendingAction, setPendingAction] = useState<{ type: "book" | "chat" | "add_service"; provider?: ServiceProvider } | null>(null);
@@ -106,15 +101,33 @@ export default function App() {
     setCurrentPage(1);
   }, [selectedCategory, selectedNeighborhood, searchQuery, selectedFilterSection]);
 
-  // Load user session on mount
+  // Load the real Supabase session on mount, then keep currentUser in sync with it
+  // (covers page refresh, login/logout in another tab, and token expiry) instead of localStorage.
   useEffect(() => {
-    const user = supabaseService.getCurrentUser();
-    if (user) {
+    let active = true;
+
+    supabaseService.getSession().then((user) => {
+      if (!active || !user) return;
       setCurrentUser(user);
       if (user.role === "admin") {
         setActiveView("admin");
       }
-    }
+    });
+
+    const unsubscribe = supabaseService.onAuthStateChange((user) => {
+      if (!active) return;
+      setCurrentUser(user);
+      if (user?.role === "admin") {
+        setActiveView("admin");
+      } else if (!user) {
+        setActiveView("browse");
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   const t = {
@@ -259,10 +272,8 @@ export default function App() {
   const triggerAuthFunnel = (type: "book" | "chat" | "add_service", provider?: ServiceProvider) => {
     setPendingAction({ type, provider });
     setAuthTab("signin");
-    setOtpSent(false);
-    setOtpCode("");
-    setSimulatedCode(null);
     setErrorMsg("");
+    setSuccessMsg("");
     setShowAuthModal(true);
   };
 
@@ -279,104 +290,93 @@ export default function App() {
     setPendingAction(null);
   };
 
-  // Request Simulated SMS OTP / Email OTP
-  const handleRequestOTP = async (e: React.FormEvent) => {
+  // Sign up with real Supabase email + password auth. Phone is collected here too, but only
+  // ever stored as profile data — never used as a login credential (no SMS provider is set up).
+  const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg("");
     setSuccessMsg("");
 
-    const target = authMethod === "phone" ? authPhone : authEmail;
-    if (!target.trim()) {
-      setErrorMsg(lang === "fr" ? "Veuillez remplir ce champ." : "Please fill in this field.");
+    if (!authName.trim() || !authEmail.trim() || !authPassword) {
+      setErrorMsg(lang === "fr" ? "Veuillez remplir tous les champs requis." : "Please fill in all required fields.");
       return;
     }
 
+    setAuthSubmitting(true);
     try {
-      let code = "";
-      if (authMethod === "phone") {
-        const res = await supabaseService.sendOTP(target);
-        if (!res.success) throw new Error(res.message);
-        code = res.code || "";
-        setSuccessMsg(
-          lang === "fr"
-            ? "SMS envoyé ! Code d'accès généré."
-            : "SMS Sent! Security access code generated."
-        );
-      } else {
-        const res = await supabaseService.sendEmailOTP(target);
-        if (!res.success) throw new Error(res.message);
-        code = res.code || "";
-        setSuccessMsg(
-          lang === "fr"
-            ? "E-mail envoyé ! Code de sécurité généré."
-            : "Email Sent! Verification code generated."
-        );
+      const res = await supabaseService.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+        fullName: authName.trim(),
+        phone: authPhone.trim() || undefined,
+        role: authRole,
+        preferredLanguage: lang,
+      });
+      if (!res.success) throw new Error(res.message);
+
+      if (!res.user) {
+        // Email confirmation required before a session exists yet
+        setSuccessMsg(res.message);
+        setAuthTab("signin");
+        return;
       }
 
-      setSimulatedCode(code);
-      setOtpSent(true);
+      setCurrentUser(res.user);
+      setShowAuthModal(false);
+      setAuthPassword("");
+
+      if (res.user.role === "admin") {
+        setActiveView("admin");
+      } else if (!res.user.onboarding_completed) {
+        // Shown onboarding flow automatically by layout
+      } else {
+        executePendingAction(res.user);
+      }
     } catch (err: any) {
-      setErrorMsg(err.message || "Error");
+      setErrorMsg(err.message || (lang === "fr" ? "Erreur d'inscription." : "Sign-up error."));
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
-  // Verify Simulated OTP
-  const handleVerifyOTP = async (e: React.FormEvent) => {
+  // Sign in with real Supabase email + password auth
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg("");
+    setSuccessMsg("");
 
-    if (!otpCode.trim()) {
-      setErrorMsg(lang === "fr" ? "Veuillez entrer le code." : "Please enter the code.");
+    if (!authEmail.trim() || !authPassword) {
+      setErrorMsg(lang === "fr" ? "Veuillez remplir tous les champs." : "Please fill in all fields.");
       return;
     }
 
+    setAuthSubmitting(true);
     try {
-      const target = authMethod === "phone" ? authPhone : authEmail;
-      let sessionUser: UserProfile | undefined;
+      const res = await supabaseService.signIn(authEmail.trim(), authPassword);
+      if (!res.success || !res.user) throw new Error(res.message);
 
-      if (authMethod === "phone") {
-        const res = await supabaseService.verifyOTP(target, otpCode);
-        if (!res.success) throw new Error(res.message);
-        sessionUser = res.user;
-      } else {
-        const res = await supabaseService.verifyEmailOTP(target, otpCode);
-        if (!res.success) throw new Error(res.message);
-        sessionUser = res.user;
-      }
-
-      if (!sessionUser) {
-        throw new Error(lang === "fr" ? "Échec d'authentification." : "Failed to retrieve user session profile.");
-      }
-
-      // If sign up, we may apply name
-      if (authTab === "signup" && authName.trim() && !sessionUser.fullName) {
-        sessionUser = await supabaseService.updateUserProfile({
-          fullName: authName.trim(),
-        });
-      }
-
-      setCurrentUser(sessionUser);
+      setCurrentUser(res.user);
       setShowAuthModal(false);
-      setOtpSent(false);
-      setOtpCode("");
-      setSimulatedCode(null);
+      setAuthPassword("");
 
       // Route based on role
-      if (sessionUser.role === "admin") {
+      if (res.user.role === "admin") {
         setActiveView("admin");
-      } else if (!sessionUser.onboarding_completed) {
+      } else if (!res.user.onboarding_completed) {
         // Shown onboarding flow automatically by layout
       } else {
-        executePendingAction(sessionUser);
+        executePendingAction(res.user);
       }
     } catch (err: any) {
-      setErrorMsg(err.message || (lang === "fr" ? "Code incorrect." : "Incorrect verification code."));
+      setErrorMsg(err.message || (lang === "fr" ? "Email ou mot de passe incorrect." : "Incorrect email or password."));
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
   // Logout
-  const handleLogout = () => {
-    supabaseService.logout();
+  const handleLogout = async () => {
+    await supabaseService.signOut();
     setCurrentUser(null);
     setActiveView("browse");
   };
@@ -513,29 +513,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-[#2C2520] font-sans antialiased selection:bg-amber-200/50 pb-16">
       
-      {/* Simulated SMS/Email Notification Banner */}
-      {simulatedCode && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-amber-900 border-2 border-amber-400 text-amber-50 rounded-2xl px-6 py-4 shadow-2xl z-50 max-w-sm w-11/12 animate-bounce space-y-2">
-          <div className="flex items-center gap-2 border-b border-amber-800 pb-1.5">
-            <span className="text-lg">📱</span>
-            <span className="font-black text-xs uppercase tracking-wider text-amber-300">
-              {authMethod === "phone" ? "Simulated SMS Received" : "Simulated Email Received"}
-            </span>
-          </div>
-          <p className="text-xs font-serif text-amber-100">
-            {authMethod === "phone"
-              ? `[SMS MoMo-Network] Your One Village security validation OTP verification code is:`
-              : `[E-Mail] Use this authorization code to secure your login:`}
-          </p>
-          <div className="bg-amber-950 rounded-xl py-2 px-4 text-center font-mono font-black text-lg tracking-widest text-amber-300 border border-amber-800 select-all">
-            {simulatedCode}
-          </div>
-          <p className="text-[10px] text-amber-400/80 text-center font-medium">
-            (Copy and enter the code below to complete sign-in)
-          </p>
-        </div>
-      )}
-
       {/* Upper Navigation Bar */}
       <header className="bg-white border-b border-amber-100/80 sticky top-0 z-40 shadow-sm backdrop-blur-md bg-white/95">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -626,7 +603,7 @@ export default function App() {
                 </div>
               ) : (
                 <button
-                  onClick={() => { setAuthTab("signin"); setOtpSent(false); setSimulatedCode(null); setShowAuthModal(true); }}
+                  onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); }}
                   className="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 hover:bg-amber-100 px-4 py-2.5 rounded-xl transition-colors cursor-pointer"
                 >
                   {t.signIn}
@@ -719,7 +696,7 @@ export default function App() {
               </div>
             ) : (
               <button
-                onClick={() => { setAuthTab("signin"); setOtpSent(false); setSimulatedCode(null); setShowAuthModal(true); setMobileMenuOpen(false); }}
+                onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); setMobileMenuOpen(false); }}
                 className="w-full text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 py-2.5 rounded-xl cursor-pointer text-center"
               >
                 {t.signIn}
@@ -1501,7 +1478,7 @@ export default function App() {
             {/* Custom Tab selectors */}
             <div className="flex border-b border-amber-100 pb-1">
               <button
-                onClick={() => { setAuthTab("signin"); setOtpSent(false); setSimulatedCode(null); setErrorMsg(""); }}
+                onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); }}
                 className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
                   authTab === "signin"
                     ? "border-amber-800 text-amber-950"
@@ -1511,7 +1488,7 @@ export default function App() {
                 {lang === "fr" ? "Connexion" : "Sign In"}
               </button>
               <button
-                onClick={() => { setAuthTab("signup"); setOtpSent(false); setSimulatedCode(null); setErrorMsg(""); }}
+                onClick={() => { setAuthTab("signup"); setErrorMsg(""); setSuccessMsg(""); }}
                 className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
                   authTab === "signup"
                     ? "border-amber-800 text-amber-950"
@@ -1519,30 +1496,6 @@ export default function App() {
                 }`}
               >
                 {lang === "fr" ? "S'inscrire (Nouveau)" : "Sign Up"}
-              </button>
-            </div>
-
-            {/* Verification Method toggle (Phone vs Email) */}
-            <div className="flex bg-amber-50 p-1 rounded-xl border border-amber-100">
-              <button
-                type="button"
-                onClick={() => { setAuthMethod("phone"); setOtpSent(false); setSimulatedCode(null); }}
-                className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider text-center cursor-pointer flex items-center justify-center gap-1.5 transition-all ${
-                  authMethod === "phone" ? "bg-amber-800 text-white shadow-sm" : "text-amber-900"
-                }`}
-              >
-                <Phone className="w-3.5 h-3.5" />
-                {lang === "fr" ? "Numéro MTN/Orange" : "Mobile Phone"}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setAuthMethod("email"); setOtpSent(false); setSimulatedCode(null); }}
-                className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider text-center cursor-pointer flex items-center justify-center gap-1.5 transition-all ${
-                  authMethod === "email" ? "bg-amber-800 text-white shadow-sm" : "text-amber-900"
-                }`}
-              >
-                <Mail className="w-3.5 h-3.5" />
-                {lang === "fr" ? "Adresse E-mail" : "Email Address"}
               </button>
             </div>
 
@@ -1560,103 +1513,133 @@ export default function App() {
               </div>
             )}
 
-            {/* FLOW STEP 1: SENDER OTP REQUEST */}
-            {!otpSent ? (
-              <form onSubmit={handleRequestOTP} className="space-y-4">
-                {authTab === "signup" && (
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
-                      {lang === "fr" ? "Nom Complet" : "Full Name"}
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={authName}
-                      onChange={(e) => setAuthName(e.target.value)}
-                      placeholder="e.g. Fidèle Ndembou"
-                      className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
-                    />
-                  </div>
-                )}
+            {authTab === "signup" ? (
+              <form onSubmit={handleSignUp} className="space-y-4">
+                {/* Role selector */}
+                <div className="flex bg-amber-50 p-1 rounded-xl border border-amber-100">
+                  <button
+                    type="button"
+                    onClick={() => setAuthRole("client")}
+                    className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider text-center cursor-pointer transition-all ${
+                      authRole === "client" ? "bg-amber-800 text-white shadow-sm" : "text-amber-900"
+                    }`}
+                  >
+                    {lang === "fr" ? "Je cherche un service" : "I'm looking for services"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthRole("provider")}
+                    className={`flex-1 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider text-center cursor-pointer transition-all ${
+                      authRole === "provider" ? "bg-amber-800 text-white shadow-sm" : "text-amber-900"
+                    }`}
+                  >
+                    {lang === "fr" ? "Je propose un service" : "I offer services"}
+                  </button>
+                </div>
 
-                {authMethod === "phone" ? (
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
-                      {lang === "fr" ? "Numéro WhatsApp / Téléphone Mobile (+237)" : "Cameroon Mobile Phone (+237)"}
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="tel"
-                        required
-                        value={authPhone}
-                        onChange={(e) => setAuthPhone(e.target.value)}
-                        placeholder="e.g. +237 677 88 99 00"
-                        className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
-                      />
-                    </div>
-                    <span className="text-[10px] text-amber-800/80 leading-relaxed font-serif block">
-                      {lang === "fr"
-                        ? "⚠️ Un code OTP de 6 chiffres sera simulé pour authentification."
-                        : "⚠️ A 6-digit verification code will be simulated for fast secure login."}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
-                      {lang === "fr" ? "Adresse E-mail de Secours" : "Recovery Email Address"}
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      placeholder="e.g. mon_email@yahoo.fr"
-                      className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
-                    />
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  {lang === "fr" ? "Obtenir mon code d'accès" : "Request Verification Code"}
-                </button>
-              </form>
-            ) : (
-              /* FLOW STEP 2: VERIFY OTP */
-              <form onSubmit={handleVerifyOTP} className="space-y-4 animate-fade-in">
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
-                    {lang === "fr" ? "Code de validation à 6 chiffres" : "6-Digit Validation Code"}
+                    {lang === "fr" ? "Nom Complet" : "Full Name"}
                   </label>
                   <input
                     type="text"
                     required
-                    maxLength={6}
-                    value={otpCode}
-                    onChange={(e) => setOtpCode(e.target.value)}
-                    placeholder="e.g. 123456"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3.5 text-center text-sm font-black text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-800/30 font-mono tracking-widest"
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="e.g. Fidèle Ndembou"
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
                   />
                 </div>
 
-                <div className="flex gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => { setOtpSent(false); setOtpCode(""); setSimulatedCode(null); }}
-                    className="px-4 py-3 border border-amber-200 text-amber-900 hover:bg-amber-50 font-bold rounded-xl text-xs transition-colors cursor-pointer"
-                  >
-                    {lang === "fr" ? "Retour" : "Back"}
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer text-center"
-                  >
-                    {lang === "fr" ? "Vérifier & Se Connecter" : "Verify & Sign In"}
-                  </button>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
+                    {lang === "fr" ? "Numéro WhatsApp / Téléphone Mobile (+237)" : "Cameroon Mobile Phone (+237)"}
+                  </label>
+                  <input
+                    type="tel"
+                    value={authPhone}
+                    onChange={(e) => setAuthPhone(e.target.value)}
+                    placeholder="e.g. +237 677 88 99 00"
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                  />
                 </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
+                    {lang === "fr" ? "Adresse E-mail" : "Email Address"}
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="e.g. mon_email@yahoo.fr"
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
+                    {lang === "fr" ? "Mot de passe" : "Password"}
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder={lang === "fr" ? "6 caractères minimum" : "Minimum 6 characters"}
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {lang === "fr" ? "Créer mon compte" : "Create My Account"}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleSignIn} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
+                    {lang === "fr" ? "Adresse E-mail" : "Email Address"}
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="e.g. mon_email@yahoo.fr"
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-amber-900 uppercase tracking-wider block">
+                    {lang === "fr" ? "Mot de passe" : "Password"}
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {lang === "fr" ? "Se connecter" : "Sign In"}
+                </button>
               </form>
             )}
           </div>

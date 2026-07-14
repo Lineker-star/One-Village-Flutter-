@@ -14,164 +14,53 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY) {
   }
 }
 
-// In-memory or localStorage-backed simulation for testing if Supabase is not connected yet
+// Maps a public.profiles row (see supabase/migrations/20260709000000_init_schema.sql) to the app's UserProfile shape.
+// Note: the profiles table has no onboarding_completed, email, or rewards_credit columns yet, so those are
+// filled in from the auth user / a local per-user flag rather than persisted server-side (see updateUserProfile).
+function mapDbProfileToUserProfile(row: any, email?: string | null): UserProfile {
+  const onboardedLocally = localStorage.getItem(`onevillage_onboarded_${row.id}`) === "true";
+  return {
+    id: row.id,
+    role: row.role,
+    fullName: row.full_name || "",
+    phone: row.phone || undefined,
+    whatsappNumber: row.whatsapp_number || undefined,
+    preferredLanguage: (row.preferred_language as "fr" | "en") || "fr",
+    avatarUrl: row.avatar_url || undefined,
+    referralCode: row.referral_code || undefined,
+    referredBy: row.referred_by || undefined,
+    rewardsCredit: 0,
+    onboarding_completed: row.role !== "provider" || onboardedLocally,
+    email: email || undefined,
+  };
+}
+
+// Fetches the profiles row for an authenticated Supabase user and maps it to a UserProfile.
+// Relies on the DB trigger (see supabase/migrations for the auth-profile-trigger migration) having
+// already created the row when the auth.users record was inserted.
+async function fetchProfile(authUser: { id: string; email?: string | null }): Promise<UserProfile> {
+  if (!supabaseClient) throw new Error("Supabase n'est pas configuré.");
+  const { data, error } = await supabaseClient
+    .from("profiles")
+    .select("*")
+    .eq("id", authUser.id)
+    .single();
+  if (error || !data) {
+    throw new Error("Profil introuvable. Veuillez réessayer ou contacter le support.");
+  }
+  return mapDbProfileToUserProfile(data, authUser.email);
+}
+
+// In-memory or localStorage-backed simulation of provider data for testing if Supabase is not connected yet.
+// Auth is handled entirely by real Supabase (see supabaseService below) and has no mock fallback.
 class MockSupabaseService {
-  private usersKey = "onevillage_users";
-  private currentUserIdKey = "onevillage_current_user_id";
   private providersKey = "onevillage_providers";
-  private activeOTPCode: { [phone: string]: string } = {};
 
   constructor() {
     // Seed initial providers if empty in localStorage
     if (!localStorage.getItem(this.providersKey)) {
       localStorage.setItem(this.providersKey, JSON.stringify([]));
     }
-    // Seed standard dummy users
-    if (!localStorage.getItem(this.usersKey)) {
-      localStorage.setItem(
-        this.usersKey,
-        JSON.stringify([
-          {
-            id: "admin_123",
-            role: "admin",
-            fullName: "Admin One Village",
-            phone: "+237 600 00 00 00",
-            preferredLanguage: "fr",
-            onboarding_completed: true,
-          },
-        ])
-      );
-    }
-  }
-
-  // --- Auth & OTP ---
-  async sendPhoneOTP(phone: string): Promise<{ success: boolean; code?: string; message: string }> {
-    if (!phone.match(/^\+?[0-9\s-]{8,20}$/)) {
-      return { success: false, message: "Format de téléphone invalide / Invalid phone format" };
-    }
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    this.activeOTPCode[phone] = code;
-    console.log(`[One Village SIMULATED SMS] OTP sent to ${phone}: ${code}`);
-    return {
-      success: true,
-      code,
-      message: `Code envoyé avec succès à ${phone}. (SIMULATION: Le code est ${code})`,
-    };
-  }
-
-  async verifyPhoneOTP(phone: string, code: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
-    const savedCode = this.activeOTPCode[phone];
-    if (savedCode && code === savedCode) {
-      const users = this.getUsers();
-      let user = users.find((u) => u.phone === phone);
-      
-      if (!user) {
-        user = {
-          id: `u_${Date.now()}`,
-          role: "client",
-          fullName: "",
-          phone,
-          preferredLanguage: "fr",
-          referralCode: `OV-${Math.floor(100 + Math.random() * 900)}`,
-          rewardsCredit: 0,
-          onboarding_completed: false,
-        };
-        users.push(user);
-        this.saveUsers(users);
-      }
-      
-      localStorage.setItem(this.currentUserIdKey, user.id);
-      return { success: true, user, message: "Authentifié avec succès" };
-    }
-    return { success: false, message: "Code OTP incorrect. Veuillez réessayer." };
-  }
-
-  async signInWithEmail(email: string): Promise<{ success: boolean; code?: string; message: string }> {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const phoneSim = `email_${email.replace(/[@.]/g, "_")}`;
-    this.activeOTPCode[phoneSim] = code;
-    console.log(`[One Village SIMULATED EMAIL] OTP sent to ${email}: ${code}`);
-    return {
-      success: true,
-      code,
-      message: `Code envoyé avec succès par email à ${email}. (SIMULATION: Le code est ${code})`,
-    };
-  }
-
-  async verifyEmailOTP(email: string, code: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
-    const phoneSim = `email_${email.replace(/[@.]/g, "_")}`;
-    const savedCode = this.activeOTPCode[phoneSim];
-    if (savedCode && code === savedCode) {
-      const users = this.getUsers();
-      let user = users.find((u) => u.email === email);
-      
-      if (!user) {
-        user = {
-          id: `u_${Date.now()}`,
-          role: "client",
-          fullName: "",
-          email,
-          phone: "",
-          preferredLanguage: "fr",
-          referralCode: `OV-${Math.floor(100 + Math.random() * 900)}`,
-          rewardsCredit: 0,
-          onboarding_completed: false,
-        };
-        users.push(user);
-        this.saveUsers(users);
-      }
-      
-      localStorage.setItem(this.currentUserIdKey, user.id);
-      return { success: true, user, message: "Authentifié avec succès" };
-    }
-    return { success: false, message: "Code OTP incorrect. Veuillez réessayer." };
-  }
-
-  // --- Profile operations ---
-  getCurrentUser(): UserProfile | null {
-    const id = localStorage.getItem(this.currentUserIdKey);
-    if (!id) return null;
-    const users = this.getUsers();
-    return users.find((u) => u.id === id) || null;
-  }
-
-  logout() {
-    localStorage.removeItem(this.currentUserIdKey);
-  }
-
-  getUsers(): UserProfile[] {
-    const data = localStorage.getItem(this.usersKey);
-    return data ? JSON.parse(data) : [];
-  }
-
-  saveUsers(users: UserProfile[]) {
-    localStorage.setItem(this.usersKey, JSON.stringify(users));
-  }
-
-  async updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
-    const users = this.getUsers();
-    const currentId = localStorage.getItem(this.currentUserIdKey);
-    if (!currentId) throw new Error("No authenticated user session.");
-
-    const index = users.findIndex((u) => u.id === currentId);
-    if (index === -1) {
-      throw new Error("User profile not found.");
-    }
-
-    const updated = { ...users[index], ...profile };
-    
-    // Customize referral code if a name is provided and code is currently generic
-    if (updated.fullName && (!updated.referralCode || updated.referralCode.startsWith("OV-"))) {
-      const prefix = updated.fullName.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
-      updated.referralCode = `${prefix || "OV"}-${Math.floor(100 + Math.random() * 900)}`;
-    }
-    if (updated.rewardsCredit === undefined) {
-      updated.rewardsCredit = 0;
-    }
-    
-    users[index] = updated;
-    this.saveUsers(users);
-    return updated;
   }
 
   // --- Provider Operations ---
@@ -349,12 +238,105 @@ export const supabaseService = {
     return supabaseClient !== null;
   },
 
-  getCurrentUser(): UserProfile | null {
-    return mockSupabase.getCurrentUser();
+  // Real Supabase email + password sign-up. Phone is stored as profile data only, never as a
+  // login credential (no SMS OTP provider is configured). The role passed here is only ever
+  // "client" or "provider" — "admin" cannot be self-assigned at signup (enforced again server-side
+  // by the profiles-creation trigger, which is the actual security boundary).
+  async signUp(params: {
+    email: string;
+    password: string;
+    fullName: string;
+    phone?: string;
+    role: "client" | "provider";
+    preferredLanguage: "fr" | "en";
+  }): Promise<{ success: boolean; user?: UserProfile; message: string }> {
+    if (!supabaseClient) {
+      return { success: false, message: "Supabase n'est pas configuré. Contactez l'administrateur." };
+    }
+    try {
+      const { data, error } = await supabaseClient.auth.signUp({
+        email: params.email,
+        password: params.password,
+        options: {
+          data: {
+            full_name: params.fullName,
+            phone: params.phone || null,
+            role: params.role,
+            preferred_language: params.preferredLanguage,
+          },
+        },
+      });
+      if (error) throw error;
+      if (!data.user) {
+        return { success: false, message: "Inscription impossible. Veuillez réessayer." };
+      }
+      if (!data.session) {
+        // Email confirmation is required before a session (and profile) can be fetched.
+        return {
+          success: true,
+          message: "Compte créé ! Vérifiez votre boîte e-mail pour confirmer votre adresse avant de vous connecter.",
+        };
+      }
+      const user = await fetchProfile(data.user);
+      return { success: true, user, message: "Compte créé avec succès !" };
+    } catch (err: any) {
+      console.error("Supabase sign-up error:", err);
+      return { success: false, message: err.message || "Erreur d'inscription." };
+    }
   },
 
-  logout() {
-    mockSupabase.logout();
+  async signIn(email: string, password: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
+    if (!supabaseClient) {
+      return { success: false, message: "Supabase n'est pas configuré." };
+    }
+    try {
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      if (!data.user) throw new Error("Connexion impossible.");
+      const user = await fetchProfile(data.user);
+      return { success: true, user, message: "Connecté avec succès !" };
+    } catch (err: any) {
+      console.error("Supabase sign-in error:", err);
+      return { success: false, message: err.message || "Email ou mot de passe incorrect." };
+    }
+  },
+
+  async signOut(): Promise<void> {
+    if (!supabaseClient) return;
+    await supabaseClient.auth.signOut();
+  },
+
+  // Resolves the current real Supabase session (if any) into a UserProfile. Used on app mount so a
+  // page refresh restores the logged-in state from Supabase, not from localStorage.
+  async getSession(): Promise<UserProfile | null> {
+    if (!supabaseClient) return null;
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session?.user) return null;
+    try {
+      return await fetchProfile(session.user);
+    } catch (err) {
+      console.error("Failed to load profile for active session:", err);
+      return null;
+    }
+  },
+
+  // Subscribes to real Supabase auth state changes (sign in, sign out, token refresh) and returns
+  // an unsubscribe function. Fires once immediately with the current state.
+  onAuthStateChange(callback: (user: UserProfile | null) => void): () => void {
+    if (!supabaseClient) return () => {};
+    const { data: { subscription } } = supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+      if (!session?.user) {
+        callback(null);
+        return;
+      }
+      try {
+        callback(await fetchProfile(session.user));
+      } catch (err) {
+        console.error("Failed to load profile on auth state change:", err);
+        callback(null);
+      }
+    });
+    return () => subscription.unsubscribe();
   },
 
   async verifyProvider(id: string, approve: boolean, rejectionReason?: string): Promise<ServiceProvider> {
@@ -372,133 +354,35 @@ export const supabaseService = {
     return mockSupabase.adminApproveProvider(id, approve, rejectionReason);
   },
 
-  async sendOTP(phone: string): Promise<{ success: boolean; code?: string; message: string }> {
-    if (supabaseClient) {
-      try {
-        const { error } = await supabaseClient.auth.signInWithOtp({ phone });
-        if (error) throw error;
-        return { success: true, message: "Code OTP envoyé par SMS." };
-      } catch (err: any) {
-        console.error("Supabase phone OTP error:", err);
-        return { success: false, message: err.message };
-      }
-    }
-    return mockSupabase.sendPhoneOTP(phone);
-  },
-
-  async verifyOTP(phone: string, token: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
-    if (supabaseClient) {
-      try {
-        const { data, error } = await supabaseClient.auth.verifyOtp({
-          phone,
-          token,
-          type: "sms",
-        });
-        if (error) throw error;
-        
-        const { data: profile, error: pErr } = await supabaseClient
-          .from("profiles")
-          .select("*")
-          .eq("id", data.user?.id)
-          .single();
-
-        let userProfile: UserProfile;
-        if (pErr || !profile) {
-          const newProfile = {
-            id: data.user?.id || `u_${Date.now()}`,
-            role: "client",
-            fullName: "",
-            phone,
-            preferredLanguage: "fr",
-            onboarding_completed: false,
-          };
-          await supabaseClient.from("profiles").upsert(newProfile);
-          userProfile = newProfile as UserProfile;
-        } else {
-          userProfile = profile as UserProfile;
-        }
-
-        return { success: true, user: userProfile, message: "Connecté avec succès !" };
-      } catch (err: any) {
-        console.error("Supabase verify OTP error:", err);
-        return { success: false, message: err.message };
-      }
-    }
-    return mockSupabase.verifyPhoneOTP(phone, token);
-  },
-
-  async sendEmailOTP(email: string): Promise<{ success: boolean; code?: string; message: string }> {
-    if (supabaseClient) {
-      try {
-        const { error } = await supabaseClient.auth.signInWithOtp({ email });
-        if (error) throw error;
-        return { success: true, message: "Lien magique / OTP envoyé par email." };
-      } catch (err: any) {
-        console.error("Supabase email OTP error:", err);
-        return { success: false, message: err.message };
-      }
-    }
-    return mockSupabase.signInWithEmail(email);
-  },
-
-  async verifyEmailOTP(email: string, token: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
-    if (supabaseClient) {
-      try {
-        const { data, error } = await supabaseClient.auth.verifyOtp({
-          email,
-          token,
-          type: "magiclink",
-        });
-        if (error) throw error;
-
-        const { data: profile, error: pErr } = await supabaseClient
-          .from("profiles")
-          .select("*")
-          .eq("id", data.user?.id)
-          .single();
-
-        let userProfile: UserProfile;
-        if (pErr || !profile) {
-          const newProfile = {
-            id: data.user?.id || `u_${Date.now()}`,
-            role: "client",
-            fullName: "",
-            email,
-            phone: "",
-            preferredLanguage: "fr",
-            onboarding_completed: false,
-          };
-          await supabaseClient.from("profiles").upsert(newProfile);
-          userProfile = newProfile as UserProfile;
-        } else {
-          userProfile = profile as UserProfile;
-        }
-
-        return { success: true, user: userProfile, message: "Connecté !" };
-      } catch (err: any) {
-        console.error("Supabase verify email OTP error:", err);
-        return { success: false, message: err.message };
-      }
-    }
-    return mockSupabase.verifyEmailOTP(email, token);
-  },
-
+  // Persists the subset of Partial<UserProfile> that has real columns on public.profiles.
+  // onboarding_completed, email and rewardsCredit have no column there yet: onboarding_completed is
+  // tracked with a local per-user flag (see mapDbProfileToUserProfile), email lives on auth.users
+  // already, and rewardsCredit/referral wiring is left for the referrals feature work, not this step.
   async updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
-    if (supabaseClient) {
-      const { data: { user } } = await supabaseClient.auth.getUser();
-      if (!user) throw new Error("Non connecté.");
-
-      const { data, error } = await supabaseClient
-        .from("profiles")
-        .update(profile)
-        .eq("id", user.id)
-        .select()
-        .single();
-
-      if (error) throw error;
-      return data as UserProfile;
+    if (!supabaseClient) {
+      throw new Error("Supabase n'est pas configuré.");
     }
-    return mockSupabase.updateUserProfile(profile);
+    const { data: { user } } = await supabaseClient.auth.getUser();
+    if (!user) throw new Error("Non connecté.");
+
+    const dbPatch: Record<string, any> = {};
+    if (profile.fullName !== undefined) dbPatch.full_name = profile.fullName;
+    if (profile.phone !== undefined) dbPatch.phone = profile.phone;
+    if (profile.whatsappNumber !== undefined) dbPatch.whatsapp_number = profile.whatsappNumber;
+    if (profile.preferredLanguage !== undefined) dbPatch.preferred_language = profile.preferredLanguage;
+    if (profile.avatarUrl !== undefined) dbPatch.avatar_url = profile.avatarUrl;
+    if (profile.role !== undefined) dbPatch.role = profile.role;
+
+    if (Object.keys(dbPatch).length > 0) {
+      const { error } = await supabaseClient.from("profiles").update(dbPatch).eq("id", user.id);
+      if (error) throw error;
+    }
+
+    if (profile.onboarding_completed !== undefined) {
+      localStorage.setItem(`onevillage_onboarded_${user.id}`, String(profile.onboarding_completed));
+    }
+
+    return fetchProfile(user);
   },
 
   async registerProvider(providerData: any): Promise<ServiceProvider> {
