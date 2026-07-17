@@ -4,30 +4,143 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { Booking, ServiceProvider, BookingStatus } from "../types.ts";
-import { BookOpen, User, Gift, MapPin, Calendar, Clock, DollarSign, MessageSquare, Check, RefreshCw, Award, Copy, Share2, X, Megaphone } from "lucide-react";
+import { Booking, ServiceProvider, BookingStatus, ServiceCategory, RealBooking, RealBookingStatus } from "../types.ts";
+import { BookOpen, User, Gift, MapPin, Calendar, Clock, DollarSign, MessageSquare, Check, RefreshCw, Award, Copy, Share2, X, Megaphone, Info } from "lucide-react";
+import { supabaseService } from "../lib/supabase.ts";
 
 interface DashboardProps {
   lang: "fr" | "en";
   activeChatProvider: ServiceProvider | null;
   setActiveChatProvider: (p: ServiceProvider | null) => void;
-  onPayBooking: (bookingId: string, provider: ServiceProvider) => void;
-  allProviders: ServiceProvider[];
   currentUser?: any;
   setCurrentUser?: (u: any) => void;
 }
 
-export default function Dashboard({ lang, activeChatProvider, setActiveChatProvider, onPayBooking, allProviders, currentUser, setCurrentUser }: DashboardProps) {
+export default function Dashboard({ lang, activeChatProvider, setActiveChatProvider, currentUser, setCurrentUser }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<"bookings" | "provider" | "referral" | "advertising">("bookings");
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [isProviderMode, setIsProviderMode] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Real Supabase verification status for the signed-in provider's own listing (pending/approved/
+  // rejected + reason). Only fetched when actually viewing your own real provider portal, not the
+  // "p1" demo simulation.
+  const [myProviderStatus, setMyProviderStatus] = useState<ServiceProvider | null>(null);
+
+  useEffect(() => {
+    if (activeTab === "provider" && !isProviderMode && currentUser?.role === "provider") {
+      supabaseService.getProviderFullRecord(currentUser.id).then(setMyProviderStatus).catch(() => setMyProviderStatus(null));
+    }
+  }, [activeTab, isProviderMode, currentUser]);
+
+  // Real Supabase-backed bookings (see supabase/migrations/20260715010000_bookings_realtime_and_status_rules.sql).
+  // Distinct from the legacy mock `bookings` state below, which still backs the provider-mode demo
+  // simulator, chat auto-booking, and admin dispute panel — none of those moved to Supabase yet.
+  const [realClientBookings, setRealClientBookings] = useState<RealBooking[]>([]);
+  const [loadingClientBookings, setLoadingClientBookings] = useState(false);
+  const [realProviderBookings, setRealProviderBookings] = useState<RealBooking[]>([]);
+  const [loadingProviderBookings, setLoadingProviderBookings] = useState(false);
+  const [bookingActionError, setBookingActionError] = useState("");
+
+  const fetchRealClientBookings = async () => {
+    if (!currentUser) return;
+    setLoadingClientBookings(true);
+    try {
+      const [bookingsData, ratedIds] = await Promise.all([
+        supabaseService.getMyBookingsAsClient(currentUser.id),
+        supabaseService.getRatedBookingIds(currentUser.id),
+      ]);
+      setRealClientBookings(bookingsData);
+      setRatedBookings(Object.fromEntries(Array.from(ratedIds).map((id) => [id, true])));
+    } finally {
+      setLoadingClientBookings(false);
+    }
+  };
+
+  const fetchRealProviderBookings = async () => {
+    if (!currentUser || currentUser.role !== "provider") return;
+    setLoadingProviderBookings(true);
+    try {
+      setRealProviderBookings(await supabaseService.getMyBookingsAsProvider(currentUser.id));
+    } finally {
+      setLoadingProviderBookings(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "bookings") fetchRealClientBookings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentUser?.id]);
+
+  useEffect(() => {
+    if (activeTab === "provider" && !isProviderMode) fetchRealProviderBookings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, isProviderMode, currentUser?.id]);
+
+  const handleRealProviderStatusChange = async (bookingId: string, status: RealBookingStatus) => {
+    setBookingActionError("");
+    try {
+      await supabaseService.updateBookingStatus(bookingId, status);
+      await fetchRealProviderBookings();
+    } catch (err: any) {
+      setBookingActionError(err.message || (lang === "fr" ? "Erreur lors de la mise à jour du statut." : "Error updating status."));
+    }
+  };
+
+  const handleRealConfirmCompletion = async (bookingId: string, role: "client" | "provider") => {
+    setBookingActionError("");
+    try {
+      await supabaseService.confirmBookingCompletion(bookingId, role);
+      if (role === "client") await fetchRealClientBookings();
+      else await fetchRealProviderBookings();
+    } catch (err: any) {
+      setBookingActionError(err.message || (lang === "fr" ? "Erreur lors de la confirmation." : "Error confirming completion."));
+    }
+  };
+
+  const REAL_STATUS_STYLES: Record<RealBookingStatus, string> = {
+    requested: "bg-amber-100 text-amber-800 border-amber-200",
+    accepted: "bg-blue-50 text-blue-700 border-blue-200",
+    in_progress: "bg-purple-50 text-purple-700 border-purple-200",
+    completed: "bg-emerald-100 text-emerald-800 border-emerald-200",
+    cancelled: "bg-rose-50 text-rose-700 border-rose-200",
+  };
+  const REAL_STATUS_LABELS: Record<"fr" | "en", Record<RealBookingStatus, string>> = {
+    fr: { requested: "Demandée", accepted: "Acceptée", in_progress: "En cours", completed: "Terminée", cancelled: "Annulée" },
+    en: { requested: "Requested", accepted: "Accepted", in_progress: "In Progress", completed: "Completed", cancelled: "Cancelled" },
+  };
+  const getRealStatusBadge = (status: RealBookingStatus) => (
+    <span className={`px-2.5 py-0.5 rounded-full border text-[10px] font-bold tracking-wide uppercase ${REAL_STATUS_STYLES[status]}`}>
+      {REAL_STATUS_LABELS[lang][status]}
+    </span>
+  );
+
+  // Minimal ServiceProvider stub built from a RealBooking's denormalized fields, just enough for
+  // the mock ChatInterface (chat itself hasn't moved to Supabase yet) to open a conversation.
+  const bookingToProviderStub = (b: RealBooking): ServiceProvider => ({
+    id: b.providerId,
+    name: b.providerBusinessName || "Prestataire",
+    businessName: b.providerBusinessName,
+    phone: "",
+    whatsappNumber: "",
+    category: ServiceCategory.HOME_HELP,
+    neighborhoodId: "",
+    rateFCFA: b.agreedPrice,
+    rateUnit: "jour",
+    description: "",
+    languages: [],
+    rating: 5,
+    reviewCount: 0,
+    verified: true,
+    available: true,
+  });
 
   // Rating and review states
   const [ratingBooking, setRatingBooking] = useState<any>(null);
   const [rateStars, setRateStars] = useState(5);
   const [rateComment, setRateComment] = useState("");
   const [rateSubmitting, setRateSubmitting] = useState(false);
+  const [rateErrorMsg, setRateErrorMsg] = useState("");
   const [ratedBookings, setRatedBookings] = useState<Record<string, boolean>>({});
 
   // Dynamic Referral states
@@ -281,28 +394,25 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
 
   const handleRateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ratingBooking) return;
+    if (!ratingBooking || !currentUser) return;
     setRateSubmitting(true);
+    setRateErrorMsg("");
     try {
-      const res = await fetch(`/api/providers/${ratingBooking.providerId}/reviews`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rating: rateStars,
-          text: rateComment,
-          reviewerName: ratingBooking.customerName || "Client de Bertoua",
-          bookingId: ratingBooking.id,
-        }),
+      await supabaseService.submitRating({
+        bookingId: ratingBooking.id,
+        clientId: currentUser.id,
+        providerId: ratingBooking.providerId,
+        stars: rateStars,
+        comment: rateComment.trim() || undefined,
       });
-      if (res.ok) {
-        setRatedBookings(prev => ({ ...prev, [ratingBooking.id]: true }));
-        setRatingBooking(null);
-        setRateComment("");
-        setRateStars(5);
-        fetchBookings();
-      }
-    } catch (err) {
+      setRatedBookings(prev => ({ ...prev, [ratingBooking.id]: true }));
+      setRatingBooking(null);
+      setRateComment("");
+      setRateStars(5);
+      fetchRealClientBookings();
+    } catch (err: any) {
       console.error("Error submitting review:", err);
+      setRateErrorMsg(err.message || (lang === "fr" ? "Erreur lors de l'envoi de votre avis." : "Error submitting your review."));
     } finally {
       setRateSubmitting(false);
     }
@@ -328,11 +438,6 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
       </span>
     );
   };
-
-  // Provider filter: if inProviderMode is active, show only bookings assigned to provider 'p1' (Jean-Pierre)
-  const filteredBookings = isProviderMode
-    ? bookings.filter((b) => b.providerId === "p1")
-    : bookings;
 
   return (
     <div id="dashboard-container" className="space-y-6">
@@ -387,113 +492,131 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
       {/* Bookings View */}
       {activeTab === "bookings" && (
         <div className="space-y-4">
-          {filteredBookings.length === 0 ? (
+          {bookingActionError && (
+            <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3 text-xs font-bold">
+              {bookingActionError}
+            </div>
+          )}
+          {loadingClientBookings ? (
+            <div className="text-center py-10 text-xs font-serif text-amber-800 flex items-center justify-center gap-1.5">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>{lang === "fr" ? "Chargement de vos réservations..." : "Loading your bookings..."}</span>
+            </div>
+          ) : realClientBookings.length === 0 ? (
             <div className="bg-amber-50/20 border border-dashed border-amber-200 rounded-2xl p-12 text-center text-sm text-amber-900">
               {t.noBookings}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {filteredBookings.map((b) => {
-                const prov = allProviders.find((p) => p.id === b.providerId);
-                return (
-                  <div
-                    key={b.id}
-                    className="bg-white border border-amber-100/80 p-5 rounded-2xl shadow-sm flex flex-col justify-between hover:border-amber-200 transition-colors"
-                  >
-                    <div className="space-y-3">
-                      <div className="flex justify-between items-start gap-4">
-                        <div>
-                          <h4 className="font-bold text-amber-950 text-sm">{b.providerName}</h4>
-                          <span className="text-[10px] text-amber-800 font-medium">Catégorie: {b.category}</span>
-                        </div>
-                        {getStatusBadge(b.status)}
-                      </div>
-
-                      <p className="text-xs text-amber-900/80 italic font-serif">"{b.description || "Aucune description fournie"}"</p>
-
-                      <div className="grid grid-cols-2 gap-2 text-[10px] text-amber-800/80 pt-2 border-t border-amber-50">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="w-3.5 h-3.5 text-amber-700" />
-                          {b.serviceDate}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5 text-amber-700" />
-                          {b.serviceTime}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <DollarSign className="w-3.5 h-3.5 text-amber-700" />
-                          <strong className="text-amber-950 font-bold">{b.estimatedFCFA} FCFA</strong>
-                        </span>
-                        {b.momoTransactionId && (
-                          <span className="text-[9px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-100 px-1.5 py-0.5 rounded">
-                            ID: {b.momoTransactionId}
+              {realClientBookings.map((b) => (
+                <div
+                  key={b.id}
+                  className="bg-white border border-amber-100/80 p-5 rounded-2xl shadow-sm flex flex-col justify-between hover:border-amber-200 transition-colors"
+                >
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-start gap-4">
+                      <div>
+                        <h4 className="font-bold text-amber-950 text-sm">{b.providerBusinessName || "Prestataire"}</h4>
+                        {b.categoryNameFR && (
+                          <span className="text-[10px] text-amber-800 font-medium">
+                            {lang === "fr" ? b.categoryNameFR : (b.categoryNameEN || b.categoryNameFR)}
                           </span>
                         )}
                       </div>
+                      {getRealStatusBadge(b.status)}
                     </div>
 
-                    <div className="flex flex-col gap-2 mt-4 pt-3 border-t border-amber-50">
-                      {/* Double-sided Completion and Rating Indicators */}
-                      {(b.status === "ACCEPTED" || b.status === "PAID") && (
-                        <div className="flex flex-col gap-1.5">
-                          {!b.clientCompleted ? (
-                            <button
-                              onClick={() => handleConfirmCompletion(b.id, "client")}
-                              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 rounded-xl transition-colors cursor-pointer text-center"
-                            >
-                              {lang === "fr" ? "🤝 Marquer comme accompli (Confirmer)" : "🤝 Mark Job Completed (Confirm)"}
-                            </button>
-                          ) : (
-                            <span className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded text-center font-medium">
-                              {lang === "fr" ? "✓ Vous avez validé la fin du travail. En attente du prestataire..." : "✓ You confirmed completion. Waiting for provider..."}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                    <p className="text-xs text-amber-900/80 italic font-serif">"{b.description || "Aucune description fournie"}"</p>
 
-                      {b.status === "COMPLETED" && (
-                        <div className="w-full">
-                          {ratedBookings[b.id] ? (
-                            <span className="block text-center text-[10px] text-amber-900 bg-amber-50 border border-amber-200/50 py-1.5 rounded font-black uppercase tracking-wider">
-                              ★ Évalué avec succès / Rated successfully!
-                            </span>
-                          ) : (
-                            <button
-                              onClick={() => setRatingBooking(b)}
-                              className="w-full bg-amber-800 hover:bg-amber-900 text-white font-black text-xs py-2 rounded-xl transition-colors cursor-pointer text-center"
-                            >
-                              {lang === "fr" ? "★ Noter le prestataire" : "★ Rate the Service"}
-                            </button>
-                          )}
-                        </div>
-                      )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] text-amber-800/80 pt-2 border-t border-amber-50">
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5 text-amber-700" />
+                        {new Date(b.scheduledAt).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US")}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5 text-amber-700" />
+                        {new Date(b.scheduledAt).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <DollarSign className="w-3.5 h-3.5 text-amber-700" />
+                        <strong className="text-amber-950 font-bold">{b.agreedPrice} FCFA</strong>
+                      </span>
+                    </div>
 
-                      <div className="flex gap-2">
-                        {b.status === "PENDING" && (
+                    {b.paymentMethod === "mobile_money" && (
+                      <div className="bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 text-[9px] text-amber-800 flex items-start gap-1.5">
+                        <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                        <span>
+                          {lang === "fr"
+                            ? "Mobile Money : intégration à venir — confirmation manuelle avec le prestataire."
+                            : "Mobile Money: integration coming soon — confirming manually with the provider."}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col gap-2 mt-4 pt-3 border-t border-amber-50">
+                    {b.status === "requested" && (
+                      <span className="text-[10px] text-amber-800 bg-amber-50 border border-amber-100 px-2 py-1.5 rounded text-center font-medium">
+                        {lang === "fr" ? "En attente de la réponse du prestataire..." : "Waiting for the provider to respond..."}
+                      </span>
+                    )}
+
+                    {(b.status === "accepted" || b.status === "in_progress") && (
+                      <div className="flex flex-col gap-1.5">
+                        {!b.clientConfirmedComplete ? (
                           <button
-                            onClick={() => {
-                              if (prov) onPayBooking(b.id, prov);
-                            }}
-                            className="flex-1 bg-amber-800 hover:bg-amber-900 text-white font-bold text-xs py-2.5 rounded-xl transition-all cursor-pointer shadow-sm text-center"
+                            onClick={() => handleRealConfirmCompletion(b.id, "client")}
+                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 rounded-xl transition-colors cursor-pointer text-center"
                           >
-                            {t.payNow}
+                            {lang === "fr" ? "🤝 Marquer comme accompli (Confirmer)" : "🤝 Mark Job Completed (Confirm)"}
                           </button>
+                        ) : (
+                          <span className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded text-center font-medium">
+                            {lang === "fr" ? "✓ Vous avez validé la fin du travail. En attente du prestataire..." : "✓ You confirmed completion. Waiting for provider..."}
+                          </span>
                         )}
+                        {b.providerConfirmedComplete && !b.clientConfirmedComplete && (
+                          <span className="text-[9px] text-blue-800 bg-blue-50 border border-blue-100 px-2 py-1 rounded text-center font-medium">
+                            {lang === "fr" ? "Le prestataire a déjà confirmé — à vous de jouer !" : "The provider already confirmed — your turn!"}
+                          </span>
+                        )}
+                      </div>
+                    )}
 
-                        {(b.status === "PAID" || b.status === "ACCEPTED" || b.status === "COMPLETED") && prov && (
+                    {b.status === "completed" && (
+                      <div className="w-full">
+                        {ratedBookings[b.id] ? (
+                          <span className="block text-center text-[10px] text-amber-900 bg-amber-50 border border-amber-200/50 py-1.5 rounded font-black uppercase tracking-wider">
+                            ★ Évalué avec succès / Rated successfully!
+                          </span>
+                        ) : (
                           <button
-                            onClick={() => setActiveChatProvider(prov)}
-                            className="flex-1 border border-amber-200 text-amber-950 hover:bg-amber-50 font-semibold text-xs py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                            onClick={() => setRatingBooking({ id: b.id, providerId: b.providerId, providerName: b.providerBusinessName || "Prestataire" })}
+                            className="w-full bg-amber-800 hover:bg-amber-900 text-white font-black text-xs py-2 rounded-xl transition-colors cursor-pointer text-center"
                           >
-                            <MessageSquare className="w-3.5 h-3.5" />
-                            {t.chat}
+                            {lang === "fr" ? "★ Noter le prestataire" : "★ Rate the Service"}
                           </button>
                         )}
                       </div>
-                    </div>
+                    )}
+
+                    {b.status === "cancelled" && (
+                      <span className="text-[10px] text-rose-800 bg-rose-50 border border-rose-100 px-2 py-1.5 rounded text-center font-medium block">
+                        {lang === "fr" ? "Réservation annulée" : "Booking cancelled"}
+                      </span>
+                    )}
+
+                    <button
+                      onClick={() => setActiveChatProvider(bookingToProviderStub(b))}
+                      className="w-full border border-amber-200 text-amber-950 hover:bg-amber-50 font-semibold text-xs py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      {t.chat}
+                    </button>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -523,6 +646,150 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
               </button>
             </div>
           </div>
+
+          {!isProviderMode && currentUser?.role === "provider" && myProviderStatus && myProviderStatus.status !== "approved" && (
+            <div
+              className={`rounded-2xl p-4 border space-y-1 ${
+                myProviderStatus.status === "rejected" ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"
+              }`}
+            >
+              <h4 className={`font-bold text-sm ${myProviderStatus.status === "rejected" ? "text-red-800" : "text-amber-900"}`}>
+                {myProviderStatus.status === "rejected"
+                  ? (lang === "fr" ? "Profil rejeté" : "Profile rejected")
+                  : (lang === "fr" ? "Profil en attente de vérification" : "Profile pending verification")}
+              </h4>
+              {myProviderStatus.status === "rejected" && (
+                <p className="text-xs text-red-800/90 font-serif">
+                  {myProviderStatus.rejectionReason ||
+                    (lang === "fr"
+                      ? "Aucun motif fourni. Contactez l'administration pour plus de détails."
+                      : "No reason provided. Contact the administration for details.")}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!isProviderMode && currentUser?.role === "provider" && (
+            <div className="space-y-3">
+              <h4 className="font-bold text-amber-950 text-sm">
+                {lang === "fr" ? "Vos demandes de réservation" : "Your booking requests"}
+              </h4>
+
+              {bookingActionError && (
+                <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3 text-xs font-bold">
+                  {bookingActionError}
+                </div>
+              )}
+
+              {loadingProviderBookings ? (
+                <div className="text-center py-8 text-xs font-serif text-amber-800 flex items-center justify-center gap-1.5">
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>{lang === "fr" ? "Chargement..." : "Loading..."}</span>
+                </div>
+              ) : realProviderBookings.length === 0 ? (
+                <p className="text-xs text-amber-800/80">
+                  {lang === "fr" ? "Aucune demande reçue pour l'instant." : "No requests received yet."}
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {realProviderBookings.map((b) => (
+                    <div key={b.id} className="bg-white border border-amber-100 p-4 rounded-xl shadow-sm space-y-3">
+                      <div className="flex justify-between items-start gap-2">
+                        <div>
+                          <h5 className="font-bold text-amber-950 text-xs">{b.clientName || (lang === "fr" ? "Client" : "Client")}</h5>
+                          {b.clientPhone && <span className="text-[9px] text-amber-800 font-mono block">{b.clientPhone}</span>}
+                        </div>
+                        {getRealStatusBadge(b.status)}
+                      </div>
+
+                      {b.categoryNameFR && (
+                        <span className="text-[9px] text-amber-700 font-medium block">
+                          {lang === "fr" ? b.categoryNameFR : (b.categoryNameEN || b.categoryNameFR)}
+                        </span>
+                      )}
+
+                      {b.description && <p className="text-xs text-amber-900">"{b.description}"</p>}
+
+                      <div className="flex items-center justify-between text-[10px] text-amber-800/80 pt-2 border-t border-amber-50">
+                        <span className="flex items-center gap-1">
+                          <Calendar className="w-3.5 h-3.5 text-amber-700" />
+                          {new Date(b.scheduledAt).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US")}
+                        </span>
+                        <span className="font-bold text-amber-950 font-mono">{b.agreedPrice} FCFA</span>
+                      </div>
+
+                      {b.paymentMethod === "mobile_money" && (
+                        <div className="bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 text-[9px] text-amber-800 flex items-start gap-1.5">
+                          <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                          <span>
+                            {lang === "fr"
+                              ? "Mobile Money : intégration à venir — confirmation manuelle."
+                              : "Mobile Money: integration coming soon — confirming manually."}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex gap-2 pt-2 border-t border-amber-50 w-full">
+                        {b.status === "requested" && (
+                          <>
+                            <button
+                              onClick={() => handleRealProviderStatusChange(b.id, "accepted")}
+                              className="flex-1 bg-amber-800 hover:bg-amber-900 text-white text-[10px] font-bold py-2 rounded-lg cursor-pointer"
+                            >
+                              {t.accept}
+                            </button>
+                            <button
+                              onClick={() => handleRealProviderStatusChange(b.id, "cancelled")}
+                              className="flex-1 border border-red-200 text-red-800 hover:bg-red-50 text-[10px] font-bold py-2 rounded-lg cursor-pointer"
+                            >
+                              {lang === "fr" ? "Refuser" : "Decline"}
+                            </button>
+                          </>
+                        )}
+
+                        {(b.status === "accepted" || b.status === "in_progress") && (
+                          <div className="flex-1 flex flex-col gap-1.5">
+                            {b.status === "accepted" && (
+                              <button
+                                onClick={() => handleRealProviderStatusChange(b.id, "in_progress")}
+                                className="w-full border border-amber-200 text-amber-900 hover:bg-amber-50 text-[10px] font-bold py-2 rounded-lg cursor-pointer"
+                              >
+                                {lang === "fr" ? "Marquer en cours" : "Mark in progress"}
+                              </button>
+                            )}
+                            {!b.providerConfirmedComplete ? (
+                              <button
+                                onClick={() => handleRealConfirmCompletion(b.id, "provider")}
+                                className="w-full bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-bold py-2 rounded-lg cursor-pointer flex items-center justify-center gap-1"
+                              >
+                                <Check className="w-3 h-3" />
+                                {t.complete}
+                              </button>
+                            ) : (
+                              <span className="block text-center text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-100 py-1.5 rounded font-medium">
+                                {lang === "fr" ? "✓ Travail validé. En attente du client..." : "✓ Completion confirmed. Waiting for client..."}
+                              </span>
+                            )}
+                            {b.clientConfirmedComplete && !b.providerConfirmedComplete && (
+                              <span className="block text-center text-[9px] text-blue-800 bg-blue-50 border border-blue-100 py-1 rounded font-medium">
+                                {lang === "fr" ? "Le client a déjà confirmé — à vous de jouer !" : "The client already confirmed — your turn!"}
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {b.status === "cancelled" && (
+                          <span className="flex-1 text-[10px] text-rose-800 bg-rose-50 border border-rose-100 py-1.5 rounded text-center font-medium">
+                            {lang === "fr" ? "Annulée" : "Cancelled"}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {isProviderMode && (
             <div className="space-y-6 animate-fade-in">
@@ -1129,8 +1396,8 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
 
       {/* Mobile Money Ad Spend Payment Simulation Modal */}
       {payingAd && (
-        <div className="fixed inset-0 bg-amber-950/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl border border-amber-100 space-y-4 relative">
+        <div className="fixed inset-0 bg-amber-950/40 backdrop-blur-xs z-50 overflow-y-auto p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl border border-amber-100 space-y-4 relative mx-auto my-6 sm:my-10">
             <button
               onClick={() => setPayingAd(null)}
               className="absolute top-4 right-4 p-2 text-amber-900/60 hover:text-amber-950 rounded-full cursor-pointer"
@@ -1227,10 +1494,10 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
 
       {/* Interactive Rating & Review Modal (Phase 9 Integration) */}
       {ratingBooking && (
-        <div id="rating-modal-overlay" className="fixed inset-0 bg-amber-950/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div id="rating-modal" className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl border border-amber-100 space-y-4 relative animate-fade-in">
+        <div id="rating-modal-overlay" className="fixed inset-0 bg-amber-950/40 backdrop-blur-xs z-50 overflow-y-auto p-4">
+          <div id="rating-modal" className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl border border-amber-100 space-y-4 relative animate-fade-in mx-auto my-6 sm:my-10">
             <button
-              onClick={() => setRatingBooking(null)}
+              onClick={() => { setRatingBooking(null); setRateErrorMsg(""); }}
               className="absolute top-4 right-4 p-2 text-amber-900/60 hover:text-amber-950 rounded-full cursor-pointer"
             >
               <X className="w-5 h-5" />
@@ -1249,6 +1516,12 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
             </div>
 
             <form onSubmit={handleRateSubmit} className="space-y-4">
+              {rateErrorMsg && (
+                <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3 text-xs font-bold">
+                  {rateErrorMsg}
+                </div>
+              )}
+
               {/* Stars selector */}
               <div className="flex justify-center gap-2 py-2">
                 {[1, 2, 3, 4, 5].map((star) => (
@@ -1269,11 +1542,10 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
                   {lang === "fr" ? "Votre commentaire" : "Your comment"}
                 </label>
                 <textarea
-                  required
                   rows={3}
                   value={rateComment}
                   onChange={(e) => setRateComment(e.target.value)}
-                  placeholder={lang === "fr" ? "ex: Très ponctuel et travail propre, je recommande vivement !" : "ex: Very punctual and clean work, highly recommended!"}
+                  placeholder={lang === "fr" ? "ex: Très ponctuel et travail propre, je recommande vivement ! (optionnel)" : "ex: Very punctual and clean work, highly recommended! (optional)"}
                   className="w-full bg-amber-50/30 border border-amber-200 rounded-xl p-3 text-sm text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-600 focus:border-transparent"
                 />
               </div>
@@ -1282,7 +1554,7 @@ export default function Dashboard({ lang, activeChatProvider, setActiveChatProvi
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setRatingBooking(null)}
+                  onClick={() => { setRatingBooking(null); setRateErrorMsg(""); }}
                   className="flex-1 py-3 border border-amber-200 text-amber-900 hover:bg-amber-50 font-medium rounded-xl text-xs transition-colors cursor-pointer"
                 >
                   {lang === "fr" ? "Annuler" : "Cancel"}

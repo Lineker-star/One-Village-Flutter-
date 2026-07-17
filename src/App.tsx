@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { motion } from "motion/react";
 import { ServiceProvider, ServiceCategory, UserProfile } from "./types.ts";
-import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS } from "./data/bertouaData.ts";
+import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "./data/bertouaData.ts";
 import ServiceCard from "./components/ServiceCard.tsx";
 import AIGuide from "./components/AIGuide.tsx";
 import BookingModal from "./components/BookingModal.tsx";
@@ -17,6 +18,13 @@ import Dashboard from "./components/Dashboard.tsx";
 import ProviderProfile from "./components/ProviderProfile.tsx";
 import AdminDashboard from "./components/AdminDashboard.tsx";
 import PromotedAdsCarousel from "./components/PromotedAdsCarousel.tsx";
+import ProfileSettings from "./components/ProfileSettings.tsx";
+import LandingPage from "./components/LandingPage.tsx";
+import PublicProfessionalProfile from "./components/PublicProfessionalProfile.tsx";
+import PublicCompanyPage from "./components/PublicCompanyPage.tsx";
+import JobsBrowsePage from "./components/JobsBrowsePage.tsx";
+import JobDetailPage from "./components/JobDetailPage.tsx";
+import ProfessionalDirectoryPage from "./components/ProfessionalDirectoryPage.tsx";
 import { supabaseService } from "./lib/supabase.ts";
 import brandLogo from "./assets/images/one_village_logo_1784027088635.jpg";
 
@@ -43,12 +51,50 @@ import {
   RefreshCw,
   Send,
   AlertTriangle,
+  Compass,
+  Eye,
+  EyeOff,
+  Loader2,
+  ChevronDown,
+  ChevronUp,
+  ArrowUpDown,
+  Briefcase,
+  ClipboardList,
+  Settings,
+  LogOut,
+  UserPlus,
 } from "lucide-react";
 
 export default function App() {
   const [lang, setLang] = useState<"fr" | "en">("fr");
-  const [activeView, setActiveView] = useState<"browse" | "ads" | "dashboard" | "admin">("browse");
-  
+  const [activeView, setActiveView] = useState<"browse" | "ads" | "jobs" | "professionals" | "dashboard" | "admin">("browse");
+
+  // Public professional-profile route: a plain "/pro/<userId>" path check, not a full router (this
+  // app has none) — computed once from the URL at first render. See the early return further down
+  // that renders PublicProfessionalProfile standalone when this is set.
+  const [proProfileUserId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const match = window.location.pathname.match(/^\/pro\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  });
+
+  // Public company-page route: "/company/<id>", same plain path-check approach as above. Unlike
+  // the professional-profile route, this one needs to know currentUser (to show owner-only
+  // edit/delete controls), so its early return sits after the session check instead of before it.
+  const [companyPageId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const match = window.location.pathname.match(/^\/company\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  });
+
+  // Public job-posting route: "/job/<id>" — same approach as companyPageId (needs currentUser to
+  // know if the viewer is the poster or has already applied).
+  const [jobPageId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const match = window.location.pathname.match(/^\/job\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  });
+
   // Auth state
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -65,20 +111,63 @@ export default function App() {
   const [successMsg, setSuccessMsg] = useState("");
 
   // Intended action storage for authentication funnel
-  const [pendingAction, setPendingAction] = useState<{ type: "book" | "chat" | "add_service"; provider?: ServiceProvider } | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ type: "book" | "chat" | "add_service" | "professional_profile"; provider?: ServiceProvider } | null>(null);
 
   // Filtering & Search
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<ServiceCategory | "ALL">("ALL");
+  // A plain string (category slug) rather than the ServiceCategory enum: a provider can belong to
+  // an admin-approved DB-only category (e.g. an approved "Autre" suggestion) that has no
+  // corresponding enum member — see allCategories below, the live source of truth.
+  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
   const [selectedNeighborhood, setSelectedNeighborhood] = useState<string>("ALL");
+  // Specific trade (see SUB_CATEGORIES) selected via the "show more trades" pill row. Narrows
+  // results by keyword-matching the trade's label against name/description/business
+  // name/subcategory/custom_description (see matchesSubcategory below).
+  const [selectedSubcategory, setSelectedSubcategory] = useState<string | null>(null);
+  // Every category that actually exists in service_categories — the 8 "built-in" ones plus any
+  // later admin-approved suggestions — fetched live so a newly-approved category (like "Informatique
+  // (TIC)") shows up in the filter pills/dropdown without a rebuild. See Item 2 of the
+  // service/category sync fixes.
+  const [allCategories, setAllCategories] = useState<Array<{ id: number; slug: string; nameFr: string; nameEn: string }>>([]);
+
+  useEffect(() => {
+    supabaseService.getAllServiceCategories().then(setAllCategories);
+  }, []);
+
+  // Part 1, Item 1: unified search — professional profiles and open job postings, fetched once
+  // (same "fetch full list, filter client-side" pattern used by the directory/browse pages) and
+  // filtered by searchQuery below alongside filteredProviders, so they can render as their own
+  // clearly-labeled result groups rather than merging into the provider list.
+  const [allProfessionalProfilesForSearch, setAllProfessionalProfilesForSearch] = useState<Awaited<ReturnType<typeof supabaseService.getAllPublicProfessionalProfiles>>>([]);
+  const [allOpenJobsForSearch, setAllOpenJobsForSearch] = useState<Awaited<ReturnType<typeof supabaseService.getOpenJobPostings>>>([]);
+
+  useEffect(() => {
+    supabaseService.getAllPublicProfessionalProfiles().then(setAllProfessionalProfilesForSearch);
+    supabaseService.getOpenJobPostings().then(setAllOpenJobsForSearch);
+  }, []);
+
+  const [showAllTrades, setShowAllTrades] = useState(false);
+  const [sortOption, setSortOption] = useState<"relevance" | "rating" | "newest" | "price_asc" | "price_desc">("relevance");
+  // Browse mode: "filtered" is the existing single flat grid (respects the category pill/dropdown);
+  // "byCategory" (Item 4) instead groups every approved provider under its category heading, still
+  // respecting search/neighborhood but ignoring the single-category pill so all categories show at
+  // once.
+  const [browseMode, setBrowseMode] = useState<"filtered" | "byCategory">("filtered");
 
   // AI Search box ("What do you need?")
   const [aiSearchQuery, setAiSearchQuery] = useState("");
   const [aiSearchResult, setAiSearchResult] = useState<{ category: string; explanation: string } | null>(null);
+  const [aiSearchError, setAiSearchError] = useState("");
   const [aiSearching, setAiSearching] = useState(false);
 
   // Providers & DB state
+  // `providers`: legacy mock/in-memory feed (server.ts + Supabase-simulation localStorage) — still
+  // powers the Discovery Dashboard trending/most-rated sections and promoted ads, since those are
+  // derived from booking/chat activity that hasn't moved to Supabase yet (a later step).
   const [providers, setProviders] = useState<ServiceProvider[]>([]);
+  // `realProviders`: real Supabase-backed public discovery feed (public_provider_cards view) —
+  // powers the main searchable/filterable directory grid.
+  const [realProviders, setRealProviders] = useState<ServiceProvider[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Modals / Interventions
@@ -86,11 +175,65 @@ export default function App() {
   const [activeChatProvider, setActiveChatProvider] = useState<ServiceProvider | null>(null);
   const [showAddServiceModal, setShowAddServiceModal] = useState(false);
   const [adminCreatingProvider, setAdminCreatingProvider] = useState(false);
+  const [showProfileSettings, setShowProfileSettings] = useState(false);
+  // Item 2: lets "Créer un Profil Professionnel" CTAs (Explorer menu, directory page) open
+  // ProfileSettings directly on its "professional" tab instead of always landing on "personal".
+  const [profileSettingsInitialTab, setProfileSettingsInitialTab] = useState<"personal" | "professional" | "companies" | "jobs">("personal");
   const [selectedProviderForProfile, setSelectedProviderForProfile] = useState<ServiceProvider | null>(null);
   const [selectedFilterSection, setSelectedFilterSection] = useState<"none" | "most-rated" | "trending-today" | "trending-week" | "trending-month">("none");
 
   // Mobile responsiveness
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Header redesign (Item 5): desktop dropdowns — "Explorer" groups the four browse/discovery
+  // destinations, and the user/settings menu groups language + compact-view + account actions, so
+  // the top level only ever shows 1-2 primary actions plus these two dropdown triggers.
+  const [exploreMenuOpen, setExploreMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const exploreMenuRef = useRef<HTMLDivElement>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close either dropdown on an outside click — a mousedown listener (not a full-screen backdrop)
+  // so a single click on another header button both closes the menu AND still activates that button.
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (exploreMenuRef.current && !exploreMenuRef.current.contains(e.target as Node)) setExploreMenuOpen(false);
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) setUserMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
+  // Compact view: lets logged-in users (any role) collapse the marketing/discovery sections
+  // (nav browse/ads tabs, promoted ads carousel, Discovery Dashboard trending blocks) so their own
+  // account content is front and center. Persisted across sessions; irrelevant while logged out.
+  const [compactView, setCompactView] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem("ov_compact_view") !== "false";
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem("ov_compact_view", String(compactView));
+  }, [compactView]);
+
+  // Public landing page: session-based, not "shown once ever". Shown whenever there is no
+  // authenticated session (fresh visit, logged-out browsing, or after logout/session expiry) —
+  // see the getSession()/onAuthStateChange effect below, which flips this to false the moment a
+  // real session is confirmed and back to true the moment the user logs out. Defaults to true so
+  // a guest sees it first; `sessionChecked` gates the initial render so an already-logged-in
+  // returning visitor doesn't flash the landing page while the session check is in flight.
+  const [showLandingPage, setShowLandingPage] = useState(true);
+  const [sessionChecked, setSessionChecked] = useState(false);
+
+  const handleLandingGetStarted = () => {
+    setShowLandingPage(false);
+    if (!currentUser) {
+      setAuthTab("signup");
+      setErrorMsg("");
+      setSuccessMsg("");
+      setShowAuthModal(true);
+    }
+  };
 
   // Pagination (Phase 14 requirement)
   const [currentPage, setCurrentPage] = useState(1);
@@ -99,16 +242,21 @@ export default function App() {
   // Reset pagination on filter/search change
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedCategory, selectedNeighborhood, searchQuery, selectedFilterSection]);
+  }, [selectedCategory, selectedNeighborhood, selectedSubcategory, searchQuery, selectedFilterSection, sortOption]);
 
   // Load the real Supabase session on mount, then keep currentUser in sync with it
   // (covers page refresh, login/logout in another tab, and token expiry) instead of localStorage.
+  // Also drives showLandingPage: a confirmed session hides it, and it's what onAuthStateChange
+  // uses below to bring it back the moment the user logs out.
   useEffect(() => {
     let active = true;
 
     supabaseService.getSession().then((user) => {
-      if (!active || !user) return;
+      if (!active) return;
+      setSessionChecked(true);
+      if (!user) return;
       setCurrentUser(user);
+      setShowLandingPage(false);
       if (user.role === "admin") {
         setActiveView("admin");
       }
@@ -122,6 +270,9 @@ export default function App() {
       } else if (!user) {
         setActiveView("browse");
       }
+      // Session-based landing page visibility (see the state declaration above): logging in
+      // dismisses it for the rest of the session, logging out brings it back immediately.
+      setShowLandingPage(!user);
     });
 
     return () => {
@@ -143,6 +294,8 @@ export default function App() {
       sidebarTitle: "Sagesse Locale AI",
       navBrowse: "Découvrir les Services",
       navAds: "Entraide & Annonces",
+      navJobs: "Offres d'Emploi",
+      navProfessionals: "Profils Professionnels",
       navDashboard: "Mon Tableau de Bord",
       navAdmin: "Console Admin",
       getServiceAppBar: "Obtenir un Service",
@@ -168,6 +321,8 @@ export default function App() {
       sidebarTitle: "Local Wisdom AI",
       navBrowse: "Discover Services",
       navAds: "Community Ads",
+      navJobs: "Job Opportunities",
+      navProfessionals: "Professional Profiles",
       navDashboard: "My Dashboard",
       navAdmin: "Admin Console",
       getServiceAppBar: "Get Service",
@@ -199,15 +354,14 @@ export default function App() {
         staticList = await res.json();
       }
 
-      // 2. Load dynamic simulations from Supabase simulation service
-      const dynamicList = await supabaseService.loadAllProviders();
-
-      // 3. Merge them prioritizing dynamic list by ID
-      const mergedMap = new Map<string, ServiceProvider>();
-      staticList.forEach((p) => mergedMap.set(p.id, p));
-      dynamicList.forEach((p) => mergedMap.set(p.id, p));
-
-      const merged = Array.from(mergedMap.values());
+      // Item 2 fix: this used to also call supabaseService.loadAllProviders(), which queried a
+      // table literally named "providers" that was never actually created (the real table is
+      // service_providers, with a normalized schema that doesn't match this flat ServiceProvider
+      // shape at all) — every single call 404'd, and since it threw, it silently aborted this
+      // whole try block BEFORE setProviders(merged) below ever ran, forcing every load to fall
+      // back to a stale localStorage cache (or nothing, on a first visit) instead of the freshly
+      // fetched staticList. Removed entirely; staticList from /api/providers is the real data.
+      const merged = staticList;
 
       // Save to local cache for offline/low-connectivity resilience (Phase 14 requirement)
       try {
@@ -236,11 +390,52 @@ export default function App() {
     fetchProviders();
   }, [currentUser]);
 
+  // Fetch the real Supabase-backed public discovery feed for the main browse/search grid.
+  const fetchRealProviders = async () => {
+    try {
+      const cards = await supabaseService.getPublicProviderCards();
+      // The public view only ever returns approved rows, so a provider awaiting approval won't see
+      // their own pending listing there — fetch and prepend it so they can preview their card.
+      if (currentUser?.role === "provider" && !cards.some((p) => p.id === currentUser.id)) {
+        const own = await supabaseService.getProviderFullRecord(currentUser.id);
+        if (own) cards.unshift(own);
+      }
+      setRealProviders(cards);
+    } catch (err) {
+      console.error("Error fetching real providers:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchRealProviders();
+  }, [currentUser]);
+
+  // Connects a public professional profile's "view service provider profile" link
+  // (/?providerId=<id>) back into the app: once realProviders has loaded, open that provider's
+  // profile directly. Guarded with a ref so it only ever fires once per page load, not every time
+  // realProviders refreshes for unrelated reasons (e.g. after a booking).
+  const consumedProviderIdParam = useRef(false);
+  useEffect(() => {
+    if (consumedProviderIdParam.current || realProviders.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const providerId = params.get("providerId");
+    if (!providerId) return;
+    const match = realProviders.find((p) => p.id === providerId);
+    if (match) {
+      setSelectedProviderForProfile(match);
+      setActiveView("browse");
+      consumedProviderIdParam.current = true;
+      // Drop the param from the URL so a later refresh/share of the link doesn't re-trigger this.
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [realProviders]);
+
   // Handle AI Search category match
   const handleAISearch = async () => {
     if (!aiSearchQuery.trim()) return;
     setAiSearching(true);
     setAiSearchResult(null);
+    setAiSearchError("");
     try {
       const headers: any = { "Content-Type": "application/json" };
       if (currentUser) {
@@ -253,23 +448,40 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
-        setAiSearchResult({
-          category: data.category,
-          explanation: data.explanation,
-        });
         if (data.category) {
-          setSelectedCategory(data.category as ServiceCategory);
+          setAiSearchResult({
+            category: data.category,
+            explanation: data.explanation,
+          });
+          setSelectedCategory(data.category);
+        } else {
+          setAiSearchError(
+            lang === "fr"
+              ? "Aucune catégorie précise trouvée pour cette recherche — essayez de reformuler ou parcourez toutes les catégories ci-dessous."
+              : "No specific category found for that search — try rephrasing, or browse all categories below."
+          );
         }
+      } else {
+        setAiSearchError(
+          lang === "fr"
+            ? "L'assistant n'a pas pu répondre pour le moment. Réessayez dans un instant."
+            : "The assistant couldn't respond right now. Please try again in a moment."
+        );
       }
     } catch (err) {
       console.error("AI Search failed:", err);
+      setAiSearchError(
+        lang === "fr"
+          ? "Impossible de contacter l'assistant. Vérifiez votre connexion et réessayez."
+          : "Couldn't reach the assistant. Check your connection and try again."
+      );
     } finally {
       setAiSearching(false);
     }
   };
 
   // Auth gate function
-  const triggerAuthFunnel = (type: "book" | "chat" | "add_service", provider?: ServiceProvider) => {
+  const triggerAuthFunnel = (type: "book" | "chat" | "add_service" | "professional_profile", provider?: ServiceProvider) => {
     setPendingAction({ type, provider });
     setAuthTab("signin");
     setErrorMsg("");
@@ -286,6 +498,9 @@ export default function App() {
       setActiveChatProvider(pendingAction.provider);
     } else if (pendingAction.type === "add_service") {
       setShowAddServiceModal(true);
+    } else if (pendingAction.type === "professional_profile") {
+      setProfileSettingsInitialTab("professional");
+      setShowProfileSettings(true);
     }
     setPendingAction(null);
   };
@@ -395,30 +610,150 @@ export default function App() {
     }
   };
 
-  // Filter logic: Only show approved providers, OR if the current user is that provider themselves
-  const filteredProviders = providers.filter((p) => {
+  // Item 2: routes straight to the Step 8b professional profile creation form (ProfileSettings'
+  // "professional" tab, which renders ProfessionalProfileEditor) from the Explorer menu, the
+  // Professional Directory page's CTA, or anywhere else that needs it.
+  const openProfessionalProfileCreation = () => {
+    if (!currentUser) {
+      triggerAuthFunnel("professional_profile");
+      return;
+    }
+    setProfileSettingsInitialTab("professional");
+    setShowProfileSettings(true);
+  };
+
+  // Filter logic: Only show approved providers, OR if the current user is that provider themselves.
+  // Sourced from the real Supabase-backed `realProviders` feed (public_provider_cards), not the
+  // legacy mock `providers` array.
+  const filteredProviders = realProviders.filter((p) => {
     const isApproved = p.verified || p.status === "approved";
     const isMine = currentUser && p.id === currentUser.id;
     const isAdmin = currentUser && currentUser.role === "admin";
-    
+
     // Unverified providers are hidden from guests and other clients
     if (!isApproved && !isMine && !isAdmin) {
       return false;
     }
 
+    const query = searchQuery.trim().toLowerCase();
+    // Matches business name, description (FR/EN already merged into p.description), category name
+    // (all assigned categories, both languages, live built-in OR DB-only), subcategory, and
+    // custom_description ("Autre" free text) — see the 20260717000000 migration, which exposes
+    // subcategories/custom_descriptions on public_provider_cards for exactly this.
+    const assignedCategories = (p.categories && p.categories.length > 0 ? p.categories : [p.category]);
+    const categoryNameHaystack = assignedCategories
+      .map((c) => {
+        const builtIn = CATEGORY_DETAILS[c as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+        const live = allCategories.find((ac) => ac.slug === c);
+        return `${builtIn?.nameFR || live?.nameFr || ""} ${builtIn?.nameEN || live?.nameEn || ""}`;
+      })
+      .join(" ")
+      .toLowerCase();
+    const subcategoryHaystack = (p.subcategories || []).join(" ").toLowerCase();
+    const customDescHaystack = (p.customDescriptions || []).join(" ").toLowerCase();
     const matchesSearch =
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (p.businessName && p.businessName.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    const matchesCategory = selectedCategory === "ALL" || p.category === selectedCategory;
+      query === "" ||
+      p.name.toLowerCase().includes(query) ||
+      p.description.toLowerCase().includes(query) ||
+      (p.businessName && p.businessName.toLowerCase().includes(query)) ||
+      categoryNameHaystack.includes(query) ||
+      subcategoryHaystack.includes(query) ||
+      customDescHaystack.includes(query);
+
+    const matchesCategory =
+      selectedCategory === "ALL" ||
+      p.category === selectedCategory ||
+      (p.categories || []).includes(selectedCategory);
     const matchesNeighborhood = selectedNeighborhood === "ALL" || p.neighborhoodId === selectedNeighborhood;
 
-    return matchesSearch && matchesCategory && matchesNeighborhood;
+    // Trade-level refinement (see selectedSubcategory state comment above). Checks the real
+    // provider_services.subcategory tokens first (exact match), falling back to a keyword guess
+    // against name/description/business name for providers registered before that data was tracked.
+    let matchesSubcategory = true;
+    if (selectedSubcategory) {
+      const sub = SUB_CATEGORIES.find((s) => s.id === selectedSubcategory);
+      if (sub) {
+        const subcategoryTokens = (p.subcategories || []).flatMap((s) => s.split(",").map((x) => x.trim()));
+        if (subcategoryTokens.includes(sub.id)) {
+          matchesSubcategory = true;
+        } else {
+          const keywords = sub.labelFR
+            .replace(/[^\p{L}\s]/gu, "")
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w) => w.length > 3);
+          const haystack = `${p.name} ${p.businessName || ""} ${p.description}`.toLowerCase();
+          matchesSubcategory = keywords.length === 0 || keywords.some((k) => haystack.includes(k));
+        }
+      }
+    }
+
+    return matchesSearch && matchesCategory && matchesNeighborhood && matchesSubcategory;
   });
 
-  // Sort logic for Discovery (Phase 10)
-  if (selectedCategory !== "ALL") {
+  // Part 1, Item 1: unified search groups — professional profiles (by headline/bio/skills) and
+  // open job postings (by title/description/category), shown as their own labeled sections
+  // alongside filteredProviders rather than merged into one list. Empty when there's no active
+  // search, so these sections simply don't render.
+  const searchQueryTrimmed = searchQuery.trim().toLowerCase();
+  const matchingProfessionalProfiles =
+    searchQueryTrimmed === ""
+      ? []
+      : allProfessionalProfilesForSearch.filter((p) => {
+          const haystack = `${p.headline} ${p.bio} ${(p.skills || []).join(" ")}`.toLowerCase();
+          return haystack.includes(searchQueryTrimmed);
+        });
+  const matchingJobPostings =
+    searchQueryTrimmed === ""
+      ? []
+      : allOpenJobsForSearch.filter((j) => {
+          const haystack = `${j.title} ${j.description} ${j.categoryNameFr || ""} ${j.categoryNameEn || ""}`.toLowerCase();
+          return haystack.includes(searchQueryTrimmed);
+        });
+
+  // Category-grouped browse view (Item 4): every approved provider grouped under its category
+  // heading, using the live allCategories list so a newly-approved category gets its own section
+  // automatically. Respects search + neighborhood filters but deliberately ignores the single
+  // selectedCategory pill/selectedSubcategory, since the entire point of this view is to see every
+  // category's providers at once rather than one at a time.
+  const groupedByCategory = allCategories
+    .map((cat) => {
+      const items = realProviders.filter((p) => {
+        const isApproved = p.verified || p.status === "approved";
+        const isMine = currentUser && p.id === currentUser.id;
+        const isAdmin = currentUser && currentUser.role === "admin";
+        if (!isApproved && !isMine && !isAdmin) return false;
+
+        const assignedCategories = (p.categories && p.categories.length > 0 ? p.categories : [p.category]);
+        if (!assignedCategories.includes(cat.slug)) return false;
+
+        const query = searchQuery.trim().toLowerCase();
+        const matchesSearch =
+          query === "" ||
+          p.name.toLowerCase().includes(query) ||
+          p.description.toLowerCase().includes(query) ||
+          (p.businessName && p.businessName.toLowerCase().includes(query)) ||
+          (p.subcategories || []).join(" ").toLowerCase().includes(query) ||
+          (p.customDescriptions || []).join(" ").toLowerCase().includes(query);
+        const matchesNeighborhood = selectedNeighborhood === "ALL" || p.neighborhoodId === selectedNeighborhood;
+
+        return matchesSearch && matchesNeighborhood;
+      });
+      return { cat, items };
+    })
+    .filter((g) => g.items.length > 0);
+
+  // Sort logic. An explicit sort choice (Item 3: real "Top rated"/"Newest"/"Price" control) always
+  // takes priority over the Discovery Dashboard's blended/trending scores below.
+  if (sortOption === "rating") {
+    filteredProviders.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  } else if (sortOption === "newest") {
+    filteredProviders.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  } else if (sortOption === "price_asc") {
+    filteredProviders.sort((a, b) => (a.rateFCFA || 0) - (b.rateFCFA || 0));
+  } else if (sortOption === "price_desc") {
+    filteredProviders.sort((a, b) => (b.rateFCFA || 0) - (a.rateFCFA || 0));
+  } else if (selectedCategory !== "ALL") {
     // Category pages default-sort by a blended score (rating × recency × volume)
     filteredProviders.sort((a, b) => {
       const scoreA = (a.rating || 0) * ((a.bookingsCount || 0) + 1) * (a.recencyScore || 0.8);
@@ -482,7 +817,7 @@ export default function App() {
     });
 
   // Resolve category icons dynamically
-  const getCategoryIcon = (category: ServiceCategory) => {
+  const getCategoryIcon = (category: string) => {
     const icons = {
       [ServiceCategory.AGRICULTURE]: Sprout,
       [ServiceCategory.TRANSPORT]: Bike,
@@ -510,8 +845,39 @@ export default function App() {
     fetchProviders();
   };
 
+  // Public professional-profile route — a plain path check since this app has no routing library,
+  // computed once from the URL at first render (see proProfileUserId above). Renders standalone,
+  // bypassing the session check and landing page entirely, since this page must be viewable by
+  // anyone with the link, logged in or not.
+  if (proProfileUserId) {
+    return <PublicProfessionalProfile userId={proProfileUserId} lang={lang} />;
+  }
+
+  // Brief blank frame while the initial session check is in flight, so an already-logged-in
+  // returning visitor never flashes the landing page before we know they have a valid session.
+  if (!sessionChecked) {
+    return <div className="min-h-screen bg-[#FBF7F0]" />;
+  }
+
+  // Public company page — rendered after the session check (unlike the professional-profile route)
+  // so currentUser is resolved and owner-only edit/delete controls show correctly, but still bypasses
+  // the landing-page gate so a logged-out visitor can view it directly.
+  if (companyPageId) {
+    return <PublicCompanyPage companyId={companyPageId} lang={lang} currentUserId={currentUser?.id || null} />;
+  }
+
+  // Public job-posting page — same reasoning as companyPageId above (needs currentUser resolved
+  // for the apply flow / poster tools, but still bypasses the landing-page gate for guests).
+  if (jobPageId) {
+    return <JobDetailPage jobId={jobPageId} lang={lang} currentUserId={currentUser?.id || null} />;
+  }
+
+  if (showLandingPage) {
+    return <LandingPage lang={lang} setLang={setLang} onGetStarted={handleLandingGetStarted} />;
+  }
+
   return (
-    <div className="min-h-screen bg-[#FAF8F5] text-[#2C2520] font-sans antialiased selection:bg-amber-200/50 pb-16">
+    <div className="min-h-screen bg-[#FBF7F0] text-[#241611] font-sans antialiased selection:bg-[#E3A23D]/30 pb-16 overflow-x-hidden">
       
       {/* Upper Navigation Bar */}
       <header className="bg-white border-b border-amber-100/80 sticky top-0 z-40 shadow-sm backdrop-blur-md bg-white/95">
@@ -535,100 +901,171 @@ export default function App() {
               </div>
             </div>
 
-            {/* Desktop Nav Actions */}
-            <nav className="hidden md:flex items-center gap-6 text-sm font-semibold text-amber-900/80">
-              <button
-                onClick={() => { setActiveView("browse"); setActiveChatProvider(null); }}
-                className={`transition-colors py-2 px-1 hover:text-amber-950 cursor-pointer border-b-2 ${
-                  activeView === "browse" ? "border-amber-800 text-amber-950" : "border-transparent"
-                }`}
-              >
-                {t.navBrowse}
-              </button>
-              <button
-                onClick={() => { setActiveView("ads"); setActiveChatProvider(null); }}
-                className={`transition-colors py-2 px-1 hover:text-amber-950 cursor-pointer border-b-2 ${
-                  activeView === "ads" ? "border-amber-800 text-amber-950" : "border-transparent"
-                }`}
-              >
-                {t.navAds}
-              </button>
-              
-              {currentUser && currentUser.onboarding_completed && (
+            {/* Desktop Nav Actions — Item 5 redesign: one "Explorer" dropdown groups the four
+                browse/discovery destinations instead of listing them all as separate top-level
+                links. */}
+            <nav className="hidden md:flex items-center gap-2 text-sm font-semibold text-amber-900/80">
+              <div className="relative" ref={exploreMenuRef}>
                 <button
-                  onClick={() => { setActiveView("dashboard"); setActiveChatProvider(null); }}
-                  className={`transition-colors py-2 px-1 hover:text-amber-950 cursor-pointer border-b-2 ${
-                    activeView === "dashboard" ? "border-amber-800 text-amber-950" : "border-transparent"
+                  onClick={() => { setExploreMenuOpen((v) => !v); setUserMenuOpen(false); }}
+                  className={`flex items-center gap-1.5 py-2 px-3 rounded-xl transition-colors cursor-pointer ${
+                    ["browse", "ads", "jobs", "professionals"].includes(activeView)
+                      ? "bg-amber-50 text-amber-950"
+                      : "hover:bg-amber-50/60 hover:text-amber-950"
                   }`}
                 >
-                  {t.navDashboard}
+                  <Compass className="w-4 h-4" />
+                  {lang === "fr" ? "Explorer" : "Explore"}
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${exploreMenuOpen ? "rotate-180" : ""}`} />
                 </button>
-              )}
-
-              {currentUser && currentUser.role === "admin" && (
-                <button
-                  onClick={() => { setActiveView("admin"); setActiveChatProvider(null); }}
-                  className={`transition-colors py-2 px-1 text-red-800 hover:text-red-950 cursor-pointer border-b-2 flex items-center gap-1 ${
-                    activeView === "admin" ? "border-red-800 text-red-950 font-black" : "border-transparent"
-                  }`}
-                >
-                  <ShieldCheck className="w-4 h-4 text-red-700" />
-                  {t.navAdmin}
-                </button>
-              )}
+                {exploreMenuOpen && (
+                  <div className="absolute top-full left-0 mt-2 w-64 bg-white border border-amber-100 rounded-2xl shadow-xl z-50 p-1.5 space-y-0.5 animate-fade-in">
+                    <button
+                      onClick={() => { setActiveView("browse"); setCompactView(false); setActiveChatProvider(null); setExploreMenuOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                        activeView === "browse" ? "bg-amber-50 text-amber-950" : "text-amber-900 hover:bg-amber-50/70"
+                      }`}
+                    >
+                      {t.navBrowse}
+                    </button>
+                    <button
+                      onClick={() => { setActiveView("ads"); setActiveChatProvider(null); setExploreMenuOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                        activeView === "ads" ? "bg-amber-50 text-amber-950" : "text-amber-900 hover:bg-amber-50/70"
+                      }`}
+                    >
+                      {t.navAds}
+                    </button>
+                    <button
+                      onClick={() => { setActiveView("jobs"); setActiveChatProvider(null); setExploreMenuOpen(false); }}
+                      className={`w-full text-left px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                        activeView === "jobs" ? "bg-amber-50 text-amber-950" : "text-amber-900 hover:bg-amber-50/70"
+                      }`}
+                    >
+                      {t.navJobs}
+                    </button>
+                    <div className={`flex items-center gap-1 rounded-xl ${activeView === "professionals" ? "bg-amber-50" : ""}`}>
+                      <button
+                        onClick={() => { setActiveView("professionals"); setActiveChatProvider(null); setExploreMenuOpen(false); }}
+                        className={`flex-1 text-left px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                          activeView === "professionals" ? "text-amber-950" : "text-amber-900 hover:bg-amber-50/70"
+                        }`}
+                      >
+                        {t.navProfessionals}
+                      </button>
+                      <button
+                        onClick={() => { openProfessionalProfileCreation(); setExploreMenuOpen(false); }}
+                        title={lang === "fr" ? "Créer mon Profil Professionnel" : "Create my Professional Profile"}
+                        className="p-2 mr-1 rounded-lg text-amber-700 hover:bg-amber-100/70 hover:text-amber-900 transition-colors cursor-pointer shrink-0"
+                      >
+                        <UserPlus className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </nav>
 
-            {/* Language & Actions */}
-            <div className="hidden md:flex items-center gap-4">
-              <button
-                onClick={() => setLang(lang === "fr" ? "en" : "fr")}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-amber-900 bg-amber-50 rounded-xl border border-amber-200/50 hover:bg-amber-100/60 transition-colors cursor-pointer"
-              >
-                <Globe className="w-4 h-4 text-amber-700" />
-                <span>{lang === "fr" ? "English" : "Français"}</span>
-              </button>
-
+            {/* User/settings menu + primary CTA — language toggle, compact view, profile settings,
+                and dashboard/admin links now live inside the user dropdown instead of sitting at
+                the top level. */}
+            <div className="hidden md:flex items-center gap-3">
               {currentUser ? (
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 bg-amber-50 border border-amber-100 px-3 py-2 rounded-xl text-xs font-bold text-amber-900">
+                <div className="relative" ref={userMenuRef}>
+                  <button
+                    onClick={() => { setUserMenuOpen((v) => !v); setExploreMenuOpen(false); }}
+                    className="flex items-center gap-2 bg-amber-50 hover:bg-amber-100/60 border border-amber-100 px-3 py-2 rounded-xl text-xs font-bold text-amber-900 transition-colors cursor-pointer"
+                  >
                     <User className="w-4 h-4 text-amber-700" />
                     <span>{currentUser.fullName || currentUser.phone}</span>
-                  </div>
-                  <button
-                    onClick={handleLogout}
-                    className="text-xs font-bold text-red-700 hover:text-red-900 bg-red-50 border border-red-100 px-3 py-2 rounded-xl hover:bg-red-100 transition-colors cursor-pointer"
-                  >
-                    {t.logout}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${userMenuOpen ? "rotate-180" : ""}`} />
                   </button>
+                  {userMenuOpen && (
+                    <div className="absolute top-full right-0 mt-2 w-72 bg-white border border-amber-100 rounded-2xl shadow-xl z-50 p-1.5 space-y-0.5 animate-fade-in">
+                      {currentUser.onboarding_completed && (
+                        <button
+                          onClick={() => { setActiveView("dashboard"); setActiveChatProvider(null); setUserMenuOpen(false); }}
+                          className={`w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                            activeView === "dashboard" ? "bg-amber-50 text-amber-950" : "text-amber-900 hover:bg-amber-50/70"
+                          }`}
+                        >
+                          {t.navDashboard}
+                        </button>
+                      )}
+                      {currentUser.role === "admin" && (
+                        <button
+                          onClick={() => { setActiveView("admin"); setActiveChatProvider(null); setUserMenuOpen(false); }}
+                          className={`w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                            activeView === "admin" ? "bg-red-50 text-red-950" : "text-red-800 hover:bg-red-50/70"
+                          }`}
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          {t.navAdmin}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { setShowProfileSettings(true); setUserMenuOpen(false); }}
+                        className="w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-amber-900 hover:bg-amber-50/70 transition-colors cursor-pointer"
+                      >
+                        <Settings className="w-4 h-4 text-amber-700" />
+                        {lang === "fr" ? "Paramètres du profil" : "Profile settings"}
+                      </button>
+                      <button
+                        onClick={() => setCompactView((v) => !v)}
+                        className="w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-amber-900 hover:bg-amber-50/70 transition-colors cursor-pointer"
+                      >
+                        {compactView ? <Eye className="w-4 h-4 text-amber-700" /> : <EyeOff className="w-4 h-4 text-amber-700" />}
+                        {compactView ? (lang === "fr" ? "Vue compacte (activée)" : "Compact view (on)") : (lang === "fr" ? "Vue complète (activée)" : "Full view (on)")}
+                      </button>
+                      <button
+                        onClick={() => setLang(lang === "fr" ? "en" : "fr")}
+                        className="w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-amber-900 hover:bg-amber-50/70 transition-colors cursor-pointer"
+                      >
+                        <Globe className="w-4 h-4 text-amber-700" />
+                        {lang === "fr" ? "English" : "Français"}
+                      </button>
+                      <div className="border-t border-amber-50 my-1" />
+                      <button
+                        onClick={() => { handleLogout(); setUserMenuOpen(false); }}
+                        className="w-full text-left flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-red-700 hover:bg-red-50 transition-colors cursor-pointer"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        {t.logout}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <button
-                  onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); }}
-                  className="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 hover:bg-amber-100 px-4 py-2.5 rounded-xl transition-colors cursor-pointer"
-                >
-                  {t.signIn}
-                </button>
+                <>
+                  <button
+                    onClick={() => setLang(lang === "fr" ? "en" : "fr")}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-amber-900 bg-amber-50 rounded-xl border border-amber-200/50 hover:bg-amber-100/60 transition-colors cursor-pointer"
+                  >
+                    <Globe className="w-4 h-4 text-amber-700" />
+                    <span>{lang === "fr" ? "English" : "Français"}</span>
+                  </button>
+                  <button
+                    onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); }}
+                    className="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 hover:bg-amber-100 px-4 py-2.5 rounded-xl transition-colors cursor-pointer"
+                  >
+                    {t.signIn}
+                  </button>
+                </>
               )}
 
               <button
                 onClick={handleAppBarGetService}
                 id="btn-nav-become-provider"
-                className="bg-amber-800 hover:bg-amber-900 text-white font-black text-xs px-4 py-3 rounded-xl flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                className="bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-black text-xs px-4 py-3 rounded-xl flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
               >
                 <PlusCircle className="w-4 h-4" />
                 {currentUser?.role === "provider" ? t.navDashboard : t.becomeProviderBtn}
               </button>
             </div>
 
-            {/* Mobile Hamburger menu */}
+            {/* Mobile Hamburger menu — language toggle now lives inside the menu itself (Item 5),
+                so only the single hamburger trigger sits at the top level on mobile. */}
             <div className="flex items-center gap-3 md:hidden">
-              <button
-                onClick={() => setLang(lang === "fr" ? "en" : "fr")}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-amber-900 bg-amber-50 rounded-lg border border-amber-200/50 cursor-pointer"
-              >
-                <Globe className="w-3.5 h-3.5 text-amber-700" />
-                <span>{lang === "fr" ? "EN" : "FR"}</span>
-              </button>
               <button
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                 className="p-2 text-amber-900 hover:bg-amber-50 rounded-lg transition-colors cursor-pointer"
@@ -639,68 +1076,131 @@ export default function App() {
           </div>
         </div>
 
-        {/* Mobile menu view */}
+        {/* Mobile menu view — Item 5 redesign: same "Explorer" vs "Compte" grouping as desktop,
+            with section labels instead of one flat list of every destination. */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-amber-100 bg-white px-4 pt-4 pb-6 space-y-3.5 shadow-lg absolute w-full left-0 animate-fade-in">
-            <nav className="flex flex-col gap-3 font-semibold text-amber-900/80">
-              <button
-                onClick={() => { setActiveView("browse"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
-                className={`py-2 text-left border-l-4 pl-3 ${
-                  activeView === "browse" ? "border-amber-800 text-amber-950 font-bold bg-amber-50/50" : "border-transparent"
-                }`}
-              >
-                {t.navBrowse}
-              </button>
-              <button
-                onClick={() => { setActiveView("ads"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
-                className={`py-2 text-left border-l-4 pl-3 ${
-                  activeView === "ads" ? "border-amber-800 text-amber-950 font-bold bg-amber-50/50" : "border-transparent"
-                }`}
-              >
-                {t.navAds}
-              </button>
-              {currentUser && currentUser.onboarding_completed && (
+          <div className="md:hidden border-t border-amber-100 bg-white px-4 pt-4 pb-6 space-y-4 shadow-lg absolute w-full left-0 animate-fade-in max-h-[calc(100vh-4.5rem)] overflow-y-auto">
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-black text-amber-800/60 uppercase tracking-wider px-3">
+                {lang === "fr" ? "Explorer" : "Explore"}
+              </p>
+              <nav className="flex flex-col gap-1 font-semibold text-amber-900/80">
                 <button
-                  onClick={() => { setActiveView("dashboard"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
-                  className={`py-2 text-left border-l-4 pl-3 ${
-                    activeView === "dashboard" ? "border-amber-800 text-amber-950 font-bold bg-amber-50/50" : "border-transparent"
+                  onClick={() => { setActiveView("browse"); setCompactView(false); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                  className={`py-2.5 px-3 text-left rounded-xl text-sm ${
+                    activeView === "browse" ? "text-amber-950 font-bold bg-amber-50/70" : ""
                   }`}
                 >
-                  {t.navDashboard}
+                  {t.navBrowse}
                 </button>
-              )}
-              {currentUser && currentUser.role === "admin" && (
                 <button
-                  onClick={() => { setActiveView("admin"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
-                  className={`py-2 text-left border-l-4 pl-3 text-red-800 ${
-                    activeView === "admin" ? "border-red-800 text-red-950 font-bold bg-red-50/50" : "border-transparent"
+                  onClick={() => { setActiveView("ads"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                  className={`py-2.5 px-3 text-left rounded-xl text-sm ${
+                    activeView === "ads" ? "text-amber-950 font-bold bg-amber-50/70" : ""
                   }`}
                 >
-                  {t.navAdmin}
+                  {t.navAds}
                 </button>
-              )}
-            </nav>
+                <button
+                  onClick={() => { setActiveView("jobs"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                  className={`py-2.5 px-3 text-left rounded-xl text-sm ${
+                    activeView === "jobs" ? "text-amber-950 font-bold bg-amber-50/70" : ""
+                  }`}
+                >
+                  {t.navJobs}
+                </button>
+                <div className={`flex items-center gap-1 rounded-xl ${activeView === "professionals" ? "bg-amber-50/70" : ""}`}>
+                  <button
+                    onClick={() => { setActiveView("professionals"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                    className={`flex-1 py-2.5 px-3 text-left rounded-xl text-sm ${
+                      activeView === "professionals" ? "text-amber-950 font-bold" : ""
+                    }`}
+                  >
+                    {t.navProfessionals}
+                  </button>
+                  <button
+                    onClick={() => { openProfessionalProfileCreation(); setMobileMenuOpen(false); }}
+                    title={lang === "fr" ? "Créer mon Profil Professionnel" : "Create my Professional Profile"}
+                    className="p-2 mr-1 rounded-lg text-amber-700 hover:bg-amber-100/70 transition-colors cursor-pointer shrink-0"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                  </button>
+                </div>
+              </nav>
+            </div>
 
             {currentUser ? (
-              <div className="flex flex-col gap-2 pt-2 border-t border-amber-100">
-                <div className="flex items-center gap-2 bg-amber-50 border border-amber-100 px-3 py-2.5 rounded-xl text-xs font-bold text-amber-900">
-                  <User className="w-4.5 h-4.5 text-amber-700" />
-                  <span>{currentUser.fullName || currentUser.phone}</span>
+              <div className="space-y-1.5 pt-3 border-t border-amber-100">
+                <p className="text-[10px] font-black text-amber-800/60 uppercase tracking-wider px-3">
+                  {currentUser.fullName || currentUser.phone}
+                </p>
+                <div className="flex flex-col gap-1">
+                  {currentUser.onboarding_completed && (
+                    <button
+                      onClick={() => { setActiveView("dashboard"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                      className={`py-2.5 px-3 text-left rounded-xl text-sm font-semibold ${
+                        activeView === "dashboard" ? "text-amber-950 font-bold bg-amber-50/70" : "text-amber-900/80"
+                      }`}
+                    >
+                      {t.navDashboard}
+                    </button>
+                  )}
+                  {currentUser.role === "admin" && (
+                    <button
+                      onClick={() => { setActiveView("admin"); setActiveChatProvider(null); setMobileMenuOpen(false); }}
+                      className={`py-2.5 px-3 text-left rounded-xl text-sm font-semibold text-red-800 ${
+                        activeView === "admin" ? "font-bold bg-red-50/70" : ""
+                      }`}
+                    >
+                      {t.navAdmin}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setShowProfileSettings(true); setMobileMenuOpen(false); }}
+                    className="flex items-center gap-2 py-2.5 px-3 text-left rounded-xl text-sm font-semibold text-amber-900/80 cursor-pointer"
+                  >
+                    <Settings className="w-4 h-4 text-amber-700 shrink-0" />
+                    {lang === "fr" ? "Paramètres du profil" : "Profile settings"}
+                  </button>
+                  <button
+                    onClick={() => setCompactView((v) => !v)}
+                    className="flex items-center gap-2 py-2.5 px-3 text-left rounded-xl text-sm font-semibold text-amber-900/80 cursor-pointer"
+                  >
+                    {compactView ? <Eye className="w-4 h-4 text-amber-700 shrink-0" /> : <EyeOff className="w-4 h-4 text-amber-700 shrink-0" />}
+                    <span>{compactView ? (lang === "fr" ? "Vue compacte (activée)" : "Compact view (on)") : (lang === "fr" ? "Vue complète (activée)" : "Full view (on)")}</span>
+                  </button>
+                  <button
+                    onClick={() => setLang(lang === "fr" ? "en" : "fr")}
+                    className="flex items-center gap-2 py-2.5 px-3 text-left rounded-xl text-sm font-semibold text-amber-900/80 cursor-pointer"
+                  >
+                    <Globe className="w-4 h-4 text-amber-700 shrink-0" />
+                    {lang === "fr" ? "English" : "Français"}
+                  </button>
+                  <button
+                    onClick={() => { handleLogout(); setMobileMenuOpen(false); }}
+                    className="flex items-center gap-2 py-2.5 px-3 text-left rounded-xl text-sm font-semibold text-red-700 cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4 shrink-0" />
+                    {t.logout}
+                  </button>
                 </div>
-                <button
-                  onClick={() => { handleLogout(); setMobileMenuOpen(false); }}
-                  className="w-full text-xs font-bold text-red-700 hover:text-red-900 bg-red-50 border border-red-100 py-2.5 rounded-xl transition-colors cursor-pointer text-center"
-                >
-                  {t.logout}
-                </button>
               </div>
             ) : (
-              <button
-                onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); setMobileMenuOpen(false); }}
-                className="w-full text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 py-2.5 rounded-xl cursor-pointer text-center"
-              >
-                {t.signIn}
-              </button>
+              <div className="space-y-2 pt-3 border-t border-amber-100">
+                <button
+                  onClick={() => setLang(lang === "fr" ? "en" : "fr")}
+                  className="w-full flex items-center justify-center gap-2 text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 py-2.5 rounded-xl cursor-pointer"
+                >
+                  <Globe className="w-4 h-4 text-amber-700" />
+                  {lang === "fr" ? "English" : "Français"}
+                </button>
+                <button
+                  onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); setShowAuthModal(true); setMobileMenuOpen(false); }}
+                  className="w-full text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200/50 py-2.5 rounded-xl cursor-pointer text-center"
+                >
+                  {t.signIn}
+                </button>
+              </div>
             )}
 
             <button
@@ -708,7 +1208,7 @@ export default function App() {
                 handleAppBarGetService();
                 setMobileMenuOpen(false);
               }}
-              className="w-full bg-amber-800 hover:bg-amber-900 text-white font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+              className="w-full bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-2 shadow-sm cursor-pointer"
             >
               <PlusCircle className="w-4 h-4" />
               {currentUser?.role === "provider" ? t.navDashboard : t.becomeProviderBtn}
@@ -732,6 +1232,7 @@ export default function App() {
               onComplete={(updated) => {
                 setCurrentUser(updated);
                 fetchProviders();
+                fetchRealProviders();
                 setActiveView("browse");
               }}
             />
@@ -743,8 +1244,23 @@ export default function App() {
               <div className="space-y-8 animate-fade-in" id="search-listings-container">
                 {/* Horizontal Scrolling Discover Feeds for Signed-in Users (Phase 10) vs Guest Hero */}
                 {currentUser ? (
+                  compactView ? (
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-amber-50/60 border border-amber-100 rounded-2xl px-4 sm:px-6 py-3 sm:py-4">
+                      <p className="text-xs text-amber-800/80 font-serif">
+                        {lang === "fr"
+                          ? "Vue compacte activée — le contenu promotionnel et les tendances sont masqués."
+                          : "Compact view is on — promotional content and trending picks are hidden."}
+                      </p>
+                      <button
+                        onClick={() => setCompactView(false)}
+                        className="shrink-0 text-xs font-bold text-[#241611] bg-[#E3A23D] hover:bg-[#F2B355] px-3 py-2 rounded-xl transition-colors cursor-pointer"
+                      >
+                        {lang === "fr" ? "Tout explorer" : "Explore everything"}
+                      </button>
+                    </div>
+                  ) : (
                   selectedCategory === "ALL" && selectedNeighborhood === "ALL" && searchQuery === "" && selectedFilterSection === "none" && !selectedProviderForProfile && !activeChatProvider && (
-                    <div className="space-y-8 bg-[#FAF8F5] border border-amber-200/40 rounded-3xl p-6 sm:p-8 shadow-sm">
+                    <div className="space-y-8 bg-[#FBF7F0] border border-amber-200/40 rounded-3xl p-6 sm:p-8 shadow-sm">
                       <div className="border-b border-amber-100 pb-3 flex items-center justify-between">
                         <div>
                           <h3 className="text-base sm:text-lg font-black text-amber-950 uppercase tracking-tight">
@@ -974,27 +1490,37 @@ export default function App() {
                       </div>
                     </div>
                   )
+                  )
                 ) : (
                   /* Guest Hero Trending Card */
-                  <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-100 rounded-3xl p-6 sm:p-8 shadow-sm">
-                    <div className="flex items-center gap-2 mb-1">
+                  <motion.div
+                    initial={{ opacity: 0, y: 24 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true, amount: 0.2 }}
+                    transition={{ duration: 0.4, ease: "easeOut" }}
+                    className="relative bg-gradient-to-r from-[#FBF7F0] to-[#F5E6D3] border border-amber-100 rounded-3xl p-6 sm:p-8 shadow-sm overflow-hidden"
+                  >
+                    <div className="absolute -top-16 -right-16 w-56 h-56 bg-[#E3A23D]/15 rounded-full blur-3xl pointer-events-none" />
+                    <div className="relative flex items-center gap-2 mb-1">
                       <span className="text-xl">🔥</span>
                       <h3 className="text-base sm:text-lg font-black text-amber-950 uppercase tracking-tight">
                         {t.trendingTitle}
                       </h3>
                     </div>
-                    <p className="text-xs text-amber-800/80 mb-6 max-w-2xl font-serif">
+                    <p className="relative text-xs text-amber-800/80 mb-6 max-w-2xl font-serif">
                       {t.trendingSubtitle}
                     </p>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="relative grid grid-cols-1 md:grid-cols-3 gap-4">
                       {trendingProviders.map((p) => {
                         const catObj = CATEGORY_DETAILS[p.category];
                         const IconComp = getCategoryIcon(p.category);
                         return (
-                          <div
+                          <motion.div
                             key={`trending-${p.id}`}
-                            className="bg-white border border-amber-200/50 rounded-2xl p-4 flex flex-col justify-between hover:shadow-md transition-all group"
+                            whileHover={{ y: -4, scale: 1.015 }}
+                            transition={{ duration: 0.18 }}
+                            className="bg-white border border-amber-200/50 rounded-2xl p-4 flex flex-col justify-between hover:shadow-lg hover:shadow-amber-900/5 transition-shadow group"
                           >
                             <div>
                               <div className="flex items-center justify-between mb-2">
@@ -1026,34 +1552,46 @@ export default function App() {
                                     setActiveBookingProvider(p);
                                   }
                                 }}
-                                className="text-[10px] bg-amber-800 hover:bg-amber-900 text-white font-bold px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                                className="text-[10px] bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-bold px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
                               >
                                 {lang === "fr" ? "Contacter" : "Contact"}
                               </button>
                             </div>
-                          </div>
+                          </motion.div>
                         );
                       })}
                     </div>
-                  </div>
+                  </motion.div>
                 )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
                   {/* Left/Middle Column: Services Browser */}
                   <div className="lg:col-span-8 space-y-6">
 
-                    {/* Promoted Ads Carousel (Phase 13 requirement) */}
-                    <PromotedAdsCarousel
-                      lang={lang}
-                      selectedCategory={selectedCategory}
-                      providers={providers}
-                      onViewProviderProfile={(prov) => setSelectedProviderForProfile(prov)}
-                    />
-                    
-                    {/* Express AI Guide Search Box */}
-                    <div className="bg-amber-950 text-amber-50 rounded-3xl p-6 shadow-md space-y-4 relative overflow-hidden">
-                      <div className="absolute top-0 right-0 w-32 h-32 bg-amber-800/20 rounded-full blur-2xl -mr-10 -mt-10" />
-                      <h4 className="font-black text-xs uppercase tracking-wider text-amber-300 flex items-center gap-2">
+                    {/* Promoted Ads Carousel (Phase 13 requirement) — hidden in compact view */}
+                    {!compactView && (
+                      <PromotedAdsCarousel
+                        lang={lang}
+                        selectedCategory={selectedCategory}
+                        providers={providers}
+                        realProviders={realProviders}
+                        onViewProviderProfile={(prov) => setSelectedProviderForProfile(prov)}
+                      />
+                    )}
+
+                    {/* Express AI Guide Search Box — the browse page's own "hero" banner (Item 7):
+                        dark navy overlay instead of the terracotta/ink tone used for other dark
+                        sections, matching the landing page's overlay treatment for text readability. */}
+                    <motion.div
+                      initial={{ opacity: 0, y: 24 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true, amount: 0.3 }}
+                      transition={{ duration: 0.4, ease: "easeOut" }}
+                      className="bg-gradient-to-br from-[#0F1B2E] via-[#16243D] to-[#1A2942] text-amber-50 rounded-3xl p-6 shadow-md space-y-4 relative overflow-hidden"
+                    >
+                      <div className="absolute top-0 right-0 w-40 h-40 bg-[#E3A23D]/15 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none" />
+                      <div className="absolute bottom-0 left-0 w-32 h-32 bg-[#3E8467]/15 rounded-full blur-3xl -ml-10 -mb-10 pointer-events-none" />
+                      <h4 className="font-black text-xs uppercase tracking-wider text-[#F2B355] flex items-center gap-2 relative z-10">
                         {t.aiSearchTitle}
                       </h4>
                       <div className="flex flex-col sm:flex-row gap-2 relative z-10">
@@ -1062,20 +1600,38 @@ export default function App() {
                           value={aiSearchQuery}
                           onChange={(e) => setAiSearchQuery(e.target.value)}
                           placeholder={t.aiSearchPlaceholder}
-                          className="flex-1 bg-amber-900/40 border border-amber-800/80 rounded-xl py-3 px-4 text-xs text-white placeholder-amber-200/50 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                          className="flex-1 bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl py-3 px-4 text-xs text-white placeholder-amber-200/50 focus:outline-none focus:ring-1 focus:ring-[#F2B355]"
                           onKeyDown={(e) => { if (e.key === "Enter") handleAISearch(); }}
                         />
-                        <button
+                        <motion.button
+                          whileHover={{ scale: 1.03 }}
+                          whileTap={{ scale: 0.97 }}
+                          transition={{ duration: 0.15 }}
                           onClick={handleAISearch}
                           disabled={aiSearching}
-                          className="bg-amber-100 hover:bg-white text-amber-950 font-black text-xs px-5 py-3 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-50 shrink-0"
+                          className="bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-black text-xs px-5 py-3 rounded-xl shadow-sm cursor-pointer disabled:opacity-50 shrink-0 flex items-center justify-center gap-1.5"
                         >
-                          {aiSearching ? "..." : t.aiSearchBtn}
-                        </button>
+                          {aiSearching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                          {aiSearching ? (lang === "fr" ? "Réflexion..." : "Thinking...") : t.aiSearchBtn}
+                        </motion.button>
                       </div>
 
-                      {aiSearchResult && (
-                        <div className="bg-amber-900/30 border border-amber-800/50 rounded-2xl p-4 space-y-2 animate-fade-in text-xs leading-relaxed">
+                      {aiSearching && (
+                        <div className="flex items-center gap-2 text-xs text-amber-200/80 animate-fade-in relative z-10">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>{lang === "fr" ? "L'assistant réfléchit..." : "The assistant is thinking..."}</span>
+                        </div>
+                      )}
+
+                      {!aiSearching && aiSearchError && (
+                        <div className="bg-red-950/40 border border-red-800/50 rounded-2xl p-4 flex items-start gap-2.5 animate-fade-in text-xs leading-relaxed relative z-10">
+                          <AlertTriangle className="w-4 h-4 text-red-300 shrink-0 mt-0.5" />
+                          <p className="text-red-100">{aiSearchError}</p>
+                        </div>
+                      )}
+
+                      {!aiSearching && aiSearchResult && (
+                        <div className="bg-amber-900/30 border border-amber-800/50 rounded-2xl p-4 space-y-2 animate-fade-in text-xs leading-relaxed relative z-10">
                           <p className="font-bold text-amber-300">
                             ✨ {t.aiSearchSuccess} {lang === "fr" ? CATEGORY_DETAILS[aiSearchResult.category as ServiceCategory]?.nameFR : CATEGORY_DETAILS[aiSearchResult.category as ServiceCategory]?.nameEN}
                           </p>
@@ -1084,7 +1640,52 @@ export default function App() {
                           </p>
                         </div>
                       )}
-                    </div>
+                    </motion.div>
+
+                    {/* Category Icon Grid — mobile-first primary navigation. Pulls live from
+                        allCategories (same source as the filter dropdown/pills below — no
+                        hardcoded/duplicated category list) and reuses the existing
+                        selectedCategory/selectedSubcategory state, so tapping a tile is exactly
+                        equivalent to picking that category from the dropdown or pills row. */}
+                    <motion.div
+                      initial={{ opacity: 0, y: 16 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true, amount: 0.3 }}
+                      transition={{ duration: 0.35, ease: "easeOut" }}
+                      className="bg-white border border-amber-100 rounded-3xl p-5 sm:p-4 shadow-sm"
+                    >
+                      <h3 className="text-xs font-black text-amber-950 uppercase tracking-wide mb-3 sm:mb-2.5">
+                        {lang === "fr" ? "Parcourir par catégorie" : "Browse by Category"}
+                      </h3>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3 sm:gap-2">
+                        {allCategories.map((cat) => {
+                          // Curated icon/color for the 8 built-in categories; generic fallback icon
+                          // for anything DB-only (e.g. a newly-approved suggestion) with no
+                          // hand-picked metadata yet — same fallback pattern as the pills row below.
+                          const catObj = CATEGORY_DETAILS[cat.slug as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+                          const Icon = getCategoryIcon(cat.slug);
+                          const isSelected = selectedCategory === cat.slug && !selectedSubcategory;
+                          return (
+                            <motion.button
+                              key={cat.slug}
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => { setSelectedCategory(cat.slug); setSelectedSubcategory(null); }}
+                              className={`flex flex-col items-center justify-center gap-1.5 sm:gap-1 py-4 sm:py-2.5 px-2 rounded-2xl border transition-colors cursor-pointer ${
+                                isSelected
+                                  ? "bg-[#E3A23D] border-[#E3A23D] text-[#241611]"
+                                  : "bg-[#FBF7F0] border-amber-200/50 text-amber-900 hover:bg-amber-100/50 hover:border-amber-300/60"
+                              }`}
+                            >
+                              <Icon className="w-6 h-6 sm:w-4 sm:h-4 shrink-0" />
+                              <span className="text-[11px] sm:text-[9px] font-bold text-center leading-tight line-clamp-2">
+                                {lang === "fr" ? (catObj?.nameFR || cat.nameFr) : (catObj?.nameEN || cat.nameEn)}
+                              </span>
+                            </motion.button>
+                          );
+                        })}
+                      </div>
+                    </motion.div>
 
                     {/* Filter / Search dashboard */}
                     <div className="bg-white border border-amber-100 rounded-3xl p-6 shadow-sm space-y-4">
@@ -1095,7 +1696,7 @@ export default function App() {
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
                           placeholder={t.searchPlaceholder}
-                          className="w-full bg-[#FAF8F5] border border-amber-200/80 rounded-2xl py-3.5 pl-12 pr-4 text-sm text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-800/40"
+                          className="w-full bg-[#FBF7F0] border border-amber-200/80 rounded-2xl py-3.5 pl-12 pr-4 text-sm text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-800/40"
                         />
                       </div>
 
@@ -1103,16 +1704,39 @@ export default function App() {
                       <div className="flex flex-col sm:flex-row gap-3">
                         <div className="flex-1 relative">
                           <select
-                            value={selectedCategory}
-                            onChange={(e) => setSelectedCategory(e.target.value as ServiceCategory | "ALL")}
-                            className="w-full bg-[#FAF8F5] border border-amber-200/80 rounded-xl py-3 px-3.5 text-xs font-semibold text-amber-950 focus:outline-none cursor-pointer"
+                            value={selectedSubcategory ? `sub:${selectedSubcategory}` : selectedCategory}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val.startsWith("sub:")) {
+                                const subId = val.slice(4);
+                                const sub = SUB_CATEGORIES.find((s) => s.id === subId);
+                                setSelectedSubcategory(subId);
+                                if (sub) setSelectedCategory(sub.cat);
+                              } else {
+                                setSelectedSubcategory(null);
+                                setSelectedCategory(val);
+                              }
+                            }}
+                            className="w-full bg-[#FBF7F0] border border-amber-200/80 rounded-xl py-3 px-3.5 text-xs font-semibold text-amber-950 focus:outline-none cursor-pointer"
                           >
                             <option value="ALL">{t.allCategories}</option>
-                            {Object.keys(ServiceCategory).map((cat) => (
-                              <option key={cat} value={cat}>
-                                {lang === "fr" ? CATEGORY_DETAILS[cat as ServiceCategory]?.nameFR : CATEGORY_DETAILS[cat as ServiceCategory]?.nameEN}
-                              </option>
-                            ))}
+                            {/* Live from service_categories — includes the 8 built-in categories AND
+                                any later admin-approved suggestions (e.g. "Informatique (TIC)"),
+                                never a hardcoded/static list. */}
+                            <optgroup label={lang === "fr" ? "Catégories" : "Categories"}>
+                              {allCategories.map((cat) => (
+                                <option key={cat.slug} value={cat.slug}>
+                                  {lang === "fr" ? cat.nameFr : cat.nameEn}
+                                </option>
+                              ))}
+                            </optgroup>
+                            <optgroup label={lang === "fr" ? "Métiers spécifiques" : "Specific trades"}>
+                              {SUB_CATEGORIES.map((sub) => (
+                                <option key={sub.id} value={`sub:${sub.id}`}>
+                                  {lang === "fr" ? sub.labelFR : sub.labelEN}
+                                </option>
+                              ))}
+                            </optgroup>
                           </select>
                         </div>
 
@@ -1120,7 +1744,7 @@ export default function App() {
                           <select
                             value={selectedNeighborhood}
                             onChange={(e) => setSelectedNeighborhood(e.target.value)}
-                            className="w-full bg-[#FAF8F5] border border-amber-200/80 rounded-xl py-3 px-3.5 text-xs font-semibold text-amber-950 focus:outline-none cursor-pointer"
+                            className="w-full bg-[#FBF7F0] border border-amber-200/80 rounded-xl py-3 px-3.5 text-xs font-semibold text-amber-950 focus:outline-none cursor-pointer"
                           >
                             <option value="ALL">{t.allNeighborhoods}</option>
                             {BERTOUA_NEIGHBORHOODS.map((nh) => (
@@ -1130,45 +1754,111 @@ export default function App() {
                             ))}
                           </select>
                         </div>
+
+                        <div className="flex-1 relative">
+                          <select
+                            value={sortOption}
+                            onChange={(e) => setSortOption(e.target.value as typeof sortOption)}
+                            className="w-full bg-[#FBF7F0] border border-amber-200/80 rounded-xl py-3 pl-3.5 pr-3.5 text-xs font-semibold text-amber-950 focus:outline-none cursor-pointer"
+                          >
+                            <option value="relevance">{lang === "fr" ? "Pertinence" : "Relevance"}</option>
+                            <option value="rating">{lang === "fr" ? "Les mieux notés" : "Top rated"}</option>
+                            <option value="newest">{lang === "fr" ? "Les plus récents" : "Newest"}</option>
+                            <option value="price_asc">{lang === "fr" ? "Prix croissant" : "Price: low to high"}</option>
+                            <option value="price_desc">{lang === "fr" ? "Prix décroissant" : "Price: high to low"}</option>
+                          </select>
+                        </div>
                       </div>
 
                       {/* Quick categories pills */}
-                      <div className="flex gap-2 overflow-x-auto pt-2 pb-1 scrollbar-thin">
+                      <motion.div
+                        initial={{ opacity: 0, y: 16 }}
+                        whileInView={{ opacity: 1, y: 0 }}
+                        viewport={{ once: true, amount: 0.5 }}
+                        transition={{ duration: 0.35, ease: "easeOut" }}
+                        className="flex gap-2 overflow-x-auto pt-2 pb-1 scrollbar-thin"
+                      >
                         <button
-                          onClick={() => setSelectedCategory("ALL")}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                            selectedCategory === "ALL"
-                              ? "bg-amber-800 text-white"
+                          onClick={() => { setSelectedCategory("ALL"); setSelectedSubcategory(null); }}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer hover:scale-105 active:scale-95 ${
+                            selectedCategory === "ALL" && !selectedSubcategory
+                              ? "bg-[#E3A23D] text-[#241611]"
                               : "bg-amber-50 text-amber-900 border border-amber-200/40 hover:bg-amber-100/40"
                           }`}
                         >
                           🚀 Tout / All
                         </button>
-                        {Object.keys(ServiceCategory).map((catKey) => {
-                          const catObj = CATEGORY_DETAILS[catKey as ServiceCategory];
-                          const Icon = getCategoryIcon(catKey as ServiceCategory);
-                          const isSelected = selectedCategory === catKey;
+                        {allCategories.map((cat) => {
+                          // Curated icon/color for the 8 built-in categories; a generic fallback
+                          // icon for anything DB-only (e.g. a newly-approved suggestion) that has no
+                          // hand-picked metadata yet.
+                          const catObj = CATEGORY_DETAILS[cat.slug as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+                          const Icon = getCategoryIcon(cat.slug);
+                          const isSelected = selectedCategory === cat.slug && !selectedSubcategory;
                           return (
                             <button
-                              key={catKey}
-                              onClick={() => setSelectedCategory(catKey as ServiceCategory)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shrink-0 cursor-pointer ${
+                              key={cat.slug}
+                              onClick={() => { setSelectedCategory(cat.slug); setSelectedSubcategory(null); }}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shrink-0 cursor-pointer hover:scale-105 active:scale-95 ${
                                 isSelected
-                                  ? "bg-amber-800 text-white"
+                                  ? "bg-[#E3A23D] text-[#241611]"
                                   : "bg-amber-50 text-amber-900 border border-amber-200/40 hover:bg-amber-100/40"
                               }`}
                             >
                               <Icon className="w-3.5 h-3.5" />
-                              {lang === "fr" ? catObj.nameFR : catObj.nameEN}
+                              {lang === "fr" ? (catObj?.nameFR || cat.nameFr) : (catObj?.nameEN || cat.nameEn)}
                             </button>
                           );
                         })}
-                      </div>
+                        <button
+                          onClick={() => setShowAllTrades((v) => !v)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all shrink-0 cursor-pointer hover:scale-105 active:scale-95 bg-white border border-amber-300 text-amber-900 hover:bg-amber-50"
+                        >
+                          {lang === "fr" ? `Plus de métiers (${SUB_CATEGORIES.length})` : `More trades (${SUB_CATEGORIES.length})`}
+                          {showAllTrades ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                        </button>
+                      </motion.div>
+
+                      {/* Full trade list (Item 1: every category/sub-category that exists, not just
+                          the 8 top-level ones) — collapsed by default given there are 30+. */}
+                      {showAllTrades && (
+                        <div className="flex flex-wrap gap-2 pt-1 pb-1 animate-fade-in border-t border-amber-50 mt-1">
+                          {SUB_CATEGORIES.map((sub) => {
+                            const isSelected = selectedSubcategory === sub.id;
+                            return (
+                              <button
+                                key={sub.id}
+                                onClick={() => {
+                                  if (isSelected) {
+                                    setSelectedSubcategory(null);
+                                  } else {
+                                    setSelectedSubcategory(sub.id);
+                                    setSelectedCategory(sub.cat);
+                                  }
+                                }}
+                                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer hover:scale-105 active:scale-95 ${
+                                  isSelected
+                                    ? "bg-[#E3A23D] text-[#241611]"
+                                    : "bg-amber-50 text-amber-900 border border-amber-200/40 hover:bg-amber-100/40"
+                                }`}
+                              >
+                                {lang === "fr" ? sub.labelFR : sub.labelEN}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
 
                     {/* Dedicated AI Chat Launcher Banner (Phase 6 requirement) */}
-                    <div className="bg-gradient-to-br from-amber-800 to-amber-950 text-white rounded-3xl p-6 shadow-sm relative overflow-hidden group border border-amber-700/20">
-                      <div className="absolute -right-8 -bottom-8 w-36 h-36 bg-amber-600/10 rounded-full blur-2xl group-hover:scale-110 transition-transform duration-500" />
+                    <motion.div
+                      initial={{ opacity: 0, y: 24 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true, amount: 0.3 }}
+                      transition={{ duration: 0.4, ease: "easeOut" }}
+                      className="bg-gradient-to-br from-[#7A3420] to-[#241611] text-white rounded-3xl p-6 shadow-sm relative overflow-hidden group border border-[#7A3420]/30"
+                    >
+                      <div className="absolute -right-8 -bottom-8 w-36 h-36 bg-[#E3A23D]/15 rounded-full blur-3xl group-hover:scale-110 transition-transform duration-500" />
                       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 relative z-10">
                         <div className="flex items-center gap-4">
                           <span className="w-11 h-11 rounded-full bg-amber-100 flex items-center justify-center shadow-md border border-amber-200 select-none overflow-hidden">
@@ -1180,39 +1870,39 @@ export default function App() {
                             />
                           </span>
                           <div>
-                            <h4 className="font-black text-xs uppercase tracking-wide text-amber-200 flex items-center gap-1.5">
-                              {lang === "fr" ? "Tonton l'Est — Guide IA" : "Tonton l'Est — AI Guide"}
-                              <span className="bg-amber-100 text-amber-950 text-[9px] font-black px-2 py-0.5 rounded-full uppercase">
-                                Phase 8
-                              </span>
+                            <h4 className="font-black text-xs uppercase tracking-wide text-[#F2B355] flex items-center gap-1.5">
+                              {lang === "fr" ? "Assistant One Village" : "One Village Assistant"}
                             </h4>
                             <p className="text-xs text-amber-100/95 leading-relaxed font-serif mt-1 max-w-lg">
-                              {lang === "fr" 
-                                ? "Chuchotez avec notre guide pour traduire vos phrases en Gbaya/Makaa/Fulfulde, ou calculer des prix justes à Bertoua."
-                                : "Chat with our local guide to translate to local dialects or estimate fair trade rates in Bertoua."}
+                              {lang === "fr"
+                                ? "Discutez avec notre assistant pour traduire vos phrases en Gbaya/Makaa/Fulfulde, ou estimer un prix juste à Bertoua."
+                                : "Chat with our assistant to translate to local dialects or estimate a fair trade rate in Bertoua."}
                             </p>
                           </div>
                         </div>
-                        <button
+                        <motion.button
+                          whileHover={{ scale: 1.04 }}
+                          whileTap={{ scale: 0.96 }}
+                          transition={{ duration: 0.15 }}
                           onClick={() => {
                             const widget = document.getElementById("ai-guide-widget");
                             if (widget) {
                               widget.scrollIntoView({ behavior: "smooth" });
-                              widget.classList.add("ring-4", "ring-amber-500", "ring-opacity-50");
+                              widget.classList.add("ring-4", "ring-[#E3A23D]", "ring-opacity-50");
                               // Also focus input
                               const aiInput = widget.querySelector("input");
                               if (aiInput) aiInput.focus();
                               setTimeout(() => {
-                                widget.classList.remove("ring-4", "ring-amber-500", "ring-opacity-50");
+                                widget.classList.remove("ring-4", "ring-[#E3A23D]", "ring-opacity-50");
                               }, 2000);
                             }
                           }}
-                          className="bg-amber-100 hover:bg-white text-amber-950 font-black text-xs px-5 py-3 rounded-xl transition-all shadow-sm cursor-pointer whitespace-nowrap self-stretch sm:self-auto text-center"
+                          className="bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-black text-xs px-5 py-3 rounded-xl shadow-sm cursor-pointer whitespace-nowrap self-stretch sm:self-auto text-center"
                         >
-                          {lang === "fr" ? "Discuter avec le Guide IA" : "Chat with AI Guide"}
-                        </button>
+                          {lang === "fr" ? "Discuter avec l'Assistant" : "Chat with the Assistant"}
+                        </motion.button>
                       </div>
-                    </div>
+                    </motion.div>
 
                     {/* Browse Listings Title and discovery notices */}
                     <div className="space-y-3">
@@ -1238,13 +1928,33 @@ export default function App() {
 
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-2">
                         <h2 className="text-base font-extrabold text-amber-950 uppercase tracking-wide">
-                          {t.browseTitle} ({filteredProviders.length})
+                          {browseMode === "filtered"
+                            ? `${t.browseTitle} (${filteredProviders.length})`
+                            : `${lang === "fr" ? "Parcourir par catégorie" : "Browse by category"} (${groupedByCategory.reduce((sum, g) => sum + g.items.length, 0)})`}
                         </h2>
-                        {selectedCategory !== "ALL" && (
-                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full flex items-center gap-1 shrink-0">
-                            ✨ {lang === "fr" ? "Trié par score de qualité (Avis × Récence × Volume)" : "Sorted by quality score (Reviews × Recency × Volume)"}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {selectedCategory !== "ALL" && browseMode === "filtered" && (
+                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full flex items-center gap-1">
+                              ✨ {lang === "fr" ? "Trié par score de qualité (Avis × Récence × Volume)" : "Sorted by quality score (Reviews × Recency × Volume)"}
+                            </span>
+                          )}
+                          {/* Item 4: toggle between the single filtered grid and a section-per-category
+                              browse view — both read from the same live realProviders/allCategories data. */}
+                          <div className="flex items-center bg-amber-50 border border-amber-200 rounded-xl p-0.5 text-[10px] font-bold">
+                            <button
+                              onClick={() => setBrowseMode("filtered")}
+                              className={`px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer ${browseMode === "filtered" ? "bg-[#E3A23D] text-[#241611]" : "text-amber-900 hover:bg-amber-100/60"}`}
+                            >
+                              {lang === "fr" ? "Liste" : "List"}
+                            </button>
+                            <button
+                              onClick={() => setBrowseMode("byCategory")}
+                              className={`px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer ${browseMode === "byCategory" ? "bg-[#E3A23D] text-[#241611]" : "text-amber-900 hover:bg-amber-100/60"}`}
+                            >
+                              {lang === "fr" ? "Par catégorie" : "By Category"}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1274,13 +1984,79 @@ export default function App() {
                           }}
                         />
                       </div>
-                    ) : activeChatProvider ? (
+                    ) : activeChatProvider && currentUser ? (
                       <div className="animate-fade-in">
                         <ChatInterface
                           provider={activeChatProvider}
+                          currentUser={currentUser}
                           lang={lang}
                           onBack={() => setActiveChatProvider(null)}
                         />
+                      </div>
+                    ) : browseMode === "byCategory" ? (
+                      /* Category-Grouped Browse View (Item 4) */
+                      <div className="space-y-8 animate-fade-in">
+                        {groupedByCategory.length === 0 ? (
+                          <div className="bg-white border border-dashed border-amber-200 rounded-3xl p-16 text-center text-xs text-amber-900">
+                            {t.noProviders}
+                          </div>
+                        ) : (
+                          <>
+                            {/* Jump-to-category nav chips */}
+                            <div className="flex flex-wrap gap-2">
+                              {groupedByCategory.map(({ cat, items }) => {
+                                const builtIn = CATEGORY_DETAILS[cat.slug as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+                                return (
+                                  <button
+                                    key={`jump-${cat.slug}`}
+                                    onClick={() => {
+                                      const el = document.getElementById(`cat-section-${cat.slug}`);
+                                      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-900 border border-amber-200/40 hover:bg-amber-100/40 transition-all cursor-pointer"
+                                  >
+                                    {lang === "fr" ? (builtIn?.nameFR || cat.nameFr) : (builtIn?.nameEN || cat.nameEn)} ({items.length})
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            {groupedByCategory.map(({ cat, items }) => {
+                              const builtIn = CATEGORY_DETAILS[cat.slug as ServiceCategory] as { nameFR: string; nameEN: string; color: string } | undefined;
+                              const Icon = getCategoryIcon(cat.slug);
+                              const color = builtIn?.color || "amber";
+                              return (
+                                <div key={cat.slug} id={`cat-section-${cat.slug}`} className="space-y-3 scroll-mt-24">
+                                  <div className="flex items-center gap-2 px-1">
+                                    <span className={`w-8 h-8 rounded-xl flex items-center justify-center bg-${color}-50 text-${color}-700 border border-${color}-100 shrink-0`}>
+                                      <Icon className="w-4 h-4" />
+                                    </span>
+                                    <h3 className="text-sm font-black text-amber-950 uppercase tracking-wide">
+                                      {lang === "fr" ? (builtIn?.nameFR || cat.nameFr) : (builtIn?.nameEN || cat.nameEn)}
+                                    </h3>
+                                    <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+                                      {items.length}
+                                    </span>
+                                  </div>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {items.map((p) => (
+                                      <ServiceCard
+                                        key={p.id}
+                                        provider={p}
+                                        lang={lang}
+                                        isLoggedIn={!!currentUser}
+                                        onGetService={() => triggerAuthFunnel("book", p)}
+                                        onBook={() => currentUser ? setActiveBookingProvider(p) : triggerAuthFunnel("book", p)}
+                                        onChat={() => currentUser ? setActiveChatProvider(p) : triggerAuthFunnel("chat", p)}
+                                        onViewProfile={() => setSelectedProviderForProfile(p)}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </>
+                        )}
                       </div>
                     ) : (
                       /* Listings Grid with Pagination */
@@ -1293,17 +2069,24 @@ export default function App() {
                           ) : (
                             filteredProviders
                               .slice((currentPage - 1) * providersPerPage, currentPage * providersPerPage)
-                              .map((p) => (
-                                <ServiceCard
+                              .map((p, index) => (
+                                <motion.div
                                   key={p.id}
-                                  provider={p}
-                                  lang={lang}
-                                  isLoggedIn={!!currentUser}
-                                  onGetService={() => triggerAuthFunnel("book", p)}
-                                  onBook={() => currentUser ? setActiveBookingProvider(p) : triggerAuthFunnel("book", p)}
-                                  onChat={() => currentUser ? setActiveChatProvider(p) : triggerAuthFunnel("chat", p)}
-                                  onViewProfile={() => setSelectedProviderForProfile(p)}
-                                />
+                                  initial={{ opacity: 0, y: 20 }}
+                                  whileInView={{ opacity: 1, y: 0 }}
+                                  viewport={{ once: true, amount: 0.2 }}
+                                  transition={{ duration: 0.35, ease: "easeOut", delay: Math.min(index, 5) * 0.05 }}
+                                >
+                                  <ServiceCard
+                                    provider={p}
+                                    lang={lang}
+                                    isLoggedIn={!!currentUser}
+                                    onGetService={() => triggerAuthFunnel("book", p)}
+                                    onBook={() => currentUser ? setActiveBookingProvider(p) : triggerAuthFunnel("book", p)}
+                                    onChat={() => currentUser ? setActiveChatProvider(p) : triggerAuthFunnel("chat", p)}
+                                    onViewProfile={() => setSelectedProviderForProfile(p)}
+                                  />
+                                </motion.div>
                               ))
                           )}
                         </div>
@@ -1325,7 +2108,7 @@ export default function App() {
                                 onClick={() => setCurrentPage(page)}
                                 className={`w-9 h-9 rounded-xl text-xs font-black transition-colors cursor-pointer ${
                                   currentPage === page
-                                    ? "bg-amber-800 text-white"
+                                    ? "bg-[#E3A23D] text-[#241611]"
                                     : "bg-white border border-amber-200 text-amber-950 hover:bg-amber-50"
                                 }`}
                               >
@@ -1340,6 +2123,65 @@ export default function App() {
                             >
                               {lang === "fr" ? "Suivant" : "Next"} &rarr;
                             </button>
+                          </div>
+                        )}
+
+                        {/* Part 1, Item 1: unified search — professional profiles and open job
+                            postings as their own clearly-labeled groups, distinct from the
+                            "Prestataires de services" grid above. Only appear while a search is
+                            active and something actually matches. */}
+                        {matchingProfessionalProfiles.length > 0 && (
+                          <div className="space-y-3 pt-2">
+                            <h3 className="text-sm font-black text-amber-950 uppercase tracking-wide flex items-center gap-2">
+                              <Briefcase className="w-4 h-4 text-[#245C46]" />
+                              {lang === "fr" ? "Profils Professionnels" : "Professional Profiles"} ({matchingProfessionalProfiles.length})
+                            </h3>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {matchingProfessionalProfiles.slice(0, 6).map((p) => (
+                                <a
+                                  key={p.userId}
+                                  href={`/pro/${p.userId}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="bg-white border border-amber-100 rounded-2xl p-4 hover:shadow-md hover:border-amber-200 transition-all flex items-center gap-3"
+                                >
+                                  <div className="w-10 h-10 rounded-full bg-amber-50 border border-amber-200 overflow-hidden flex items-center justify-center shrink-0">
+                                    {p.avatarUrl ? (
+                                      <img src={p.avatarUrl} alt={p.fullName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                    ) : (
+                                      <User className="w-5 h-5 text-amber-800/40" />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="font-bold text-amber-950 text-xs truncate">{p.fullName}</p>
+                                    <p className="text-[10px] text-amber-800/80 truncate">{p.headline}</p>
+                                  </div>
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {matchingJobPostings.length > 0 && (
+                          <div className="space-y-3 pt-2">
+                            <h3 className="text-sm font-black text-amber-950 uppercase tracking-wide flex items-center gap-2">
+                              <ClipboardList className="w-4 h-4 text-[#7A3420]" />
+                              {lang === "fr" ? "Offres d'Emploi" : "Job Postings"} ({matchingJobPostings.length})
+                            </h3>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {matchingJobPostings.slice(0, 6).map((j) => (
+                                <a
+                                  key={j.id}
+                                  href={`/job/${j.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="bg-white border border-amber-100 rounded-2xl p-4 hover:shadow-md hover:border-amber-200 transition-all"
+                                >
+                                  <p className="font-bold text-amber-950 text-xs truncate">{j.title}</p>
+                                  <p className="text-[10px] text-amber-800/80 mt-0.5">{j.companyName || (lang === "fr" ? "Particulier" : "Individual")}</p>
+                                </a>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1376,7 +2218,25 @@ export default function App() {
             {/* VIEW 2: AD BOARD */}
             {activeView === "ads" && (
               <div className="animate-fade-in">
-                <AdBoard lang={lang} />
+                <AdBoard lang={lang} currentUser={currentUser} />
+              </div>
+            )}
+
+            {/* VIEW 2b: JOB POSTINGS BROWSE */}
+            {activeView === "jobs" && (
+              <div className="animate-fade-in">
+                <JobsBrowsePage lang={lang} currentUserId={currentUser?.id || null} />
+              </div>
+            )}
+
+            {/* VIEW 2c: PROFESSIONAL PROFILES DIRECTORY */}
+            {activeView === "professionals" && (
+              <div className="animate-fade-in">
+                <ProfessionalDirectoryPage
+                  lang={lang}
+                  currentUserId={currentUser?.id || null}
+                  onCreateProfile={openProfessionalProfileCreation}
+                />
               </div>
             )}
 
@@ -1388,10 +2248,6 @@ export default function App() {
                     lang={lang}
                     activeChatProvider={activeChatProvider}
                     setActiveChatProvider={setActiveChatProvider}
-                    allProviders={providers}
-                    onPayBooking={(bookingId, prov) => {
-                      setActiveBookingProvider(prov);
-                    }}
                     currentUser={currentUser}
                     setCurrentUser={setCurrentUser}
                   />
@@ -1410,7 +2266,7 @@ export default function App() {
                   lang={lang}
                   currentUser={currentUser}
                   providers={providers}
-                  onRefreshProviders={fetchProviders}
+                  onRefreshProviders={() => { fetchProviders(); fetchRealProviders(); }}
                   onOpenWizard={() => setAdminCreatingProvider(true)}
                 />
               </div>
@@ -1424,13 +2280,19 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 text-center space-y-2 text-xs text-amber-900/60 font-medium">
           <p>© 2026 ONE VILLAGE — Bertoua. Tous droits réservés.</p>
           <p className="font-serif italic">"Un village fort, une communauté prospère • On est ensemble."</p>
+          <button
+            onClick={() => setShowLandingPage(true)}
+            className="text-amber-800 hover:text-amber-950 hover:underline font-bold cursor-pointer"
+          >
+            {lang === "fr" ? "Revoir la page d'accueil" : "Revisit the welcome page"}
+          </button>
         </div>
       </footer>
 
       {/* ADMIN ASSISTED SETUP OVERLAY */}
       {adminCreatingProvider && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 border border-amber-100 shadow-xl space-y-4 my-8">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 overflow-y-auto p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 border border-amber-100 shadow-xl space-y-4 mx-auto my-8">
             <div className="flex justify-between items-center">
               <div>
                 <h3 className="font-black text-amber-950 text-sm uppercase">
@@ -1466,8 +2328,8 @@ export default function App() {
 
       {/* Combined Sign In / Sign Up Modal */}
       {showAuthModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 border border-amber-100 shadow-xl space-y-5 relative">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 border border-amber-100 shadow-xl space-y-5 relative mx-auto my-6 sm:my-10">
             <button
               onClick={() => { setShowAuthModal(false); setPendingAction(null); }}
               className="absolute top-4 right-4 text-amber-800/80 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 p-2 rounded-xl transition-all cursor-pointer"
@@ -1481,7 +2343,7 @@ export default function App() {
                 onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); }}
                 className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
                   authTab === "signin"
-                    ? "border-amber-800 text-amber-950"
+                    ? "border-[#E3A23D] text-amber-950"
                     : "border-transparent text-amber-800/60 hover:text-amber-950"
                 }`}
               >
@@ -1491,7 +2353,7 @@ export default function App() {
                 onClick={() => { setAuthTab("signup"); setErrorMsg(""); setSuccessMsg(""); }}
                 className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
                   authTab === "signup"
-                    ? "border-amber-800 text-amber-950"
+                    ? "border-[#E3A23D] text-amber-950"
                     : "border-transparent text-amber-800/60 hover:text-amber-950"
                 }`}
               >
@@ -1547,7 +2409,7 @@ export default function App() {
                     value={authName}
                     onChange={(e) => setAuthName(e.target.value)}
                     placeholder="e.g. Fidèle Ndembou"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
                   />
                 </div>
 
@@ -1560,7 +2422,7 @@ export default function App() {
                     value={authPhone}
                     onChange={(e) => setAuthPhone(e.target.value)}
                     placeholder="e.g. +237 677 88 99 00"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
                   />
                 </div>
 
@@ -1574,7 +2436,7 @@ export default function App() {
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
                     placeholder="e.g. mon_email@yahoo.fr"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
                   />
                 </div>
 
@@ -1589,14 +2451,14 @@ export default function App() {
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
                     placeholder={lang === "fr" ? "6 caractères minimum" : "Minimum 6 characters"}
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={authSubmitting}
-                  className="w-full py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  className="w-full py-3 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
                   {lang === "fr" ? "Créer mon compte" : "Create My Account"}
@@ -1614,7 +2476,7 @@ export default function App() {
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
                     placeholder="e.g. mon_email@yahoo.fr"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
                   />
                 </div>
 
@@ -1628,14 +2490,14 @@ export default function App() {
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
+                    className="w-full bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-mono"
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={authSubmitting}
-                  className="w-full py-3 bg-amber-800 hover:bg-amber-900 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  className="w-full py-3 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
                   {lang === "fr" ? "Se connecter" : "Sign In"}
@@ -1647,14 +2509,29 @@ export default function App() {
       )}
 
       {/* Booking Modal Overlay */}
-      {activeBookingProvider && (
+      {activeBookingProvider && currentUser && (
         <BookingModal
           provider={activeBookingProvider}
+          currentUser={currentUser}
           lang={lang}
           onClose={() => setActiveBookingProvider(null)}
           onBookingSuccess={() => {
             fetchProviders();
             setActiveView("dashboard");
+          }}
+        />
+      )}
+
+      {/* My Profile Settings Overlay */}
+      {showProfileSettings && currentUser && (
+        <ProfileSettings
+          lang={lang}
+          currentUser={currentUser}
+          initialTab={profileSettingsInitialTab}
+          onClose={() => { setShowProfileSettings(false); setProfileSettingsInitialTab("personal"); }}
+          onUpdated={(updated) => {
+            setCurrentUser(updated);
+            fetchRealProviders();
           }}
         />
       )}

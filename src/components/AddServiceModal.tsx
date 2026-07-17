@@ -135,8 +135,8 @@ export default function AddServiceModal({ lang, onClose, onSuccess }: AddService
   };
 
   return (
-    <div id="add-service-overlay" className="fixed inset-0 bg-amber-950/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
-      <div id="add-service-container" className="bg-white rounded-2xl w-full max-w-2xl shadow-xl border border-amber-100 overflow-hidden relative my-8">
+    <div id="add-service-overlay" className="fixed inset-0 bg-amber-950/40 backdrop-blur-sm z-50 overflow-y-auto p-4">
+      <div id="add-service-container" className="bg-white rounded-2xl w-full max-w-2xl shadow-xl border border-amber-100 overflow-hidden relative mx-auto my-8">
         <button
           onClick={onClose}
           id="btn-close-service"

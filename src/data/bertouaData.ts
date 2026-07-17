@@ -84,6 +84,78 @@ export const BERTOUA_NEIGHBORHOODS: Neighborhood[] = [
   { id: "gbazi", name: "Gbazi", description: "Zone périphérique paisible, réputée pour ses maraîchers et son calme." },
   { id: "yademe", name: "Yademe", description: "Proche des centres scolaires et universitaires, quartier jeune." },
   { id: "tengue", name: "Tengue", description: "Secteur d'artisans, chaud et soudé autour de ses traditions." },
+  { id: "nkolbikon", name: "Nkolbikon", description: "Quartier résidentiel calme au nord de la ville, proche des services administratifs." },
+  { id: "madagascar", name: "Madagascar", description: "Zone populaire et commerçante, connue pour son marché de quartier animé." },
+  { id: "sic", name: "Camp SIC", description: "Cité résidentielle planifiée, prisée pour son calme et ses habitations modernes." },
+  { id: "nkolaba", name: "Nkolaba", description: "Secteur en expansion à la périphérie, mélange d'habitations et de petites exploitations." },
+  { id: "haoussa", name: "Quartier Haoussa", description: "Zone commerçante animée, réputée pour ses échoppes et son artisanat." },
+  { id: "zokoe", name: "Zokoé", description: "Quartier excentré et paisible, apprécié pour l'agriculture de proximité." },
+  { id: "nkolinda", name: "Nkolinda", description: "Secteur résidentiel en développement proche des grands axes routiers." },
+  { id: "aviation", name: "Aviation", description: "Quartier proche de l'aéroport de Bertoua, résidentiel et bien desservi." },
+  { id: "koume", name: "Koumé", description: "Quartier résidentiel en développement, apprécié pour son calme et sa proximité avec la nature." },
+  { id: "bonis", name: "Bonis", description: "Secteur populaire connu pour son dynamisme commercial de proximité." },
+  { id: "ndoumbi", name: "Ndoumbi", description: "Zone résidentielle excentrée, prisée pour ses grandes parcelles et son calme." },
+  { id: "ekounou", name: "Ékounou", description: "Quartier en pleine croissance, mélange d'habitations et de petites activités commerçantes." },
+  { id: "nyangaza", name: "Nyangaza", description: "Secteur périphérique paisible, à vocation résidentielle et agricole." },
+  { id: "dabadji", name: "Dabadji", description: "Quartier traditionnel convivial, connu pour sa vie communautaire animée." },
+  { id: "mandjou", name: "Mandjou", description: "Zone stratégique en bordure de route nationale, avec un fort passage commercial." },
+  { id: "kpoklota", name: "Kpoklota", description: "Secteur résidentiel tranquille à la périphérie de Bertoua." },
+  { id: "ngaikada", name: "Ngaikada", description: "Quartier populaire connu pour son marché de proximité et son ambiance chaleureuse." },
+  { id: "monou", name: "Monou", description: "Zone résidentielle et agricole, appréciée pour son cadre paisible." },
+];
+
+// Sub-category (specific trade/job) options shown in ProviderWizard Step 2, grouped under one of
+// the 8 top-level ServiceCategory values above. Unlike the top-level categories, these are NOT
+// backed by any database table — they're stored as free text in provider_services.subcategory —
+// so adding/removing entries here never requires a migration.
+export interface SubCategoryOption {
+  id: string;
+  labelFR: string;
+  labelEN: string;
+  cat: ServiceCategory;
+}
+
+export const SUB_CATEGORIES: SubCategoryOption[] = [
+  { id: "plumbing", labelFR: "Plomberie 🚰", labelEN: "Plumbing 🚰", cat: ServiceCategory.CONSTRUCTION },
+  { id: "electrical", labelFR: "Électricité ⚡", labelEN: "Electrical ⚡", cat: ServiceCategory.CONSTRUCTION },
+  { id: "carpentry", labelFR: "Menuiserie 🪵", labelEN: "Carpentry 🪵", cat: ServiceCategory.CONSTRUCTION },
+  { id: "masonry", labelFR: "Maçonnerie 🧱", labelEN: "Masonry 🧱", cat: ServiceCategory.CONSTRUCTION },
+
+  { id: "transport_truck", labelFR: "Camion de transport 🚛", labelEN: "Truck Transport 🚛", cat: ServiceCategory.TRANSPORT },
+  { id: "transport_tricycle", labelFR: "Tricycle / Moto-cargo 🛺", labelEN: "Tricycle / Cargo 🛺", cat: ServiceCategory.TRANSPORT },
+  { id: "transport_bike", labelFR: "Conducteur Moto-Taxi 🏍️", labelEN: "Moto-Taxi Rider 🏍️", cat: ServiceCategory.TRANSPORT },
+  { id: "transport_car", labelFR: "Chauffeur de voiture 🚗", labelEN: "Car Driver 🚗", cat: ServiceCategory.TRANSPORT },
+  { id: "delivery_general", labelFR: "Livreur de colis & marchandises 📦", labelEN: "Parcel & Goods Delivery 📦", cat: ServiceCategory.TRANSPORT },
+
+  { id: "cleaning", labelFR: "Ménage & Nettoyage 🧹", labelEN: "Cleaning & Housework 🧹", cat: ServiceCategory.HOME_HELP },
+  { id: "dry_cleaning", labelFR: "Blanchisserie / Pressing 🧺", labelEN: "Laundry / Dry cleaning 🧺", cat: ServiceCategory.HOME_HELP },
+
+  { id: "tutoring", labelFR: "Répétiteur primaire/secondaire 📚", labelEN: "Primary/Secondary Tutoring 📚", cat: ServiceCategory.EDUCATION },
+  { id: "it_services", labelFR: "Bureautique & Informatique 💻", labelEN: "IT & Office services 💻", cat: ServiceCategory.EDUCATION },
+  { id: "computer_repair", labelFR: "Réparateur d'Ordinateurs 🖥️", labelEN: "Computer Repair 🖥️", cat: ServiceCategory.EDUCATION },
+  { id: "it_specialist", labelFR: "Spécialiste IT & Réseaux 🌐", labelEN: "IT & Network Specialist 🌐", cat: ServiceCategory.EDUCATION },
+  { id: "legal_advice", labelFR: "Conseiller Juridique ⚖️", labelEN: "Legal Adviser ⚖️", cat: ServiceCategory.EDUCATION },
+
+  { id: "farm_labor", labelFR: "Labour & Aide aux champs 🧑‍🌾", labelEN: "Farm labor & Tilling 🧑‍🌾", cat: ServiceCategory.AGRICULTURE },
+  { id: "livestock", labelFR: "Soin bétail / Élevage 🐓", labelEN: "Livestock care 🐓", cat: ServiceCategory.AGRICULTURE },
+
+  { id: "childcare", labelFR: "Garde d'enfants à domicile 👶", labelEN: "Home Childcare 👶", cat: ServiceCategory.CHILDCARE },
+
+  { id: "tailoring_dress", labelFR: "Couture Robes & Tenues de fête 👗", labelEN: "Tailoring Dresses & Pagne 👗", cat: ServiceCategory.TAILORING },
+  { id: "tailoring_alter", labelFR: "Retouches de vêtements 🪡", labelEN: "Clothing alterations 🪡", cat: ServiceCategory.TAILORING },
+  { id: "shoe_repair", labelFR: "Cordonnerie / Réparation de chaussures 👞", labelEN: "Shoe Repair (Cobbler) 👞", cat: ServiceCategory.TAILORING },
+
+  { id: "tech_fridge", labelFR: "Réparateur Frigo & Climatisation ❄️", labelEN: "Fridge & AC Repair ❄️", cat: ServiceCategory.HEALTH },
+  { id: "tech_phone", labelFR: "Dépannage Téléphone / Électronique 📱", labelEN: "Phone & Electronics Repair 📱", cat: ServiceCategory.HEALTH },
+  { id: "tech_tv", labelFR: "Dépannage Télévision / Radio 📺", labelEN: "TV & Radio troubleshooting 📺", cat: ServiceCategory.HEALTH },
+  { id: "nursing_aide", labelFR: "Aide-soignant(e) à domicile 🩺", labelEN: "Home Nursing Aide 🩺", cat: ServiceCategory.HEALTH },
+
+  { id: "delivery_gas", labelFR: "Livraison de Gaz Domestique 🔋", labelEN: "Gas cylinder delivery 🔋", cat: ServiceCategory.TRANSPORT },
+  { id: "delivery_wood", labelFR: "Fournisseur de bois de chauffe 🪵", labelEN: "Firewood Delivery 🪵", cat: ServiceCategory.TRANSPORT },
+
+  { id: "trash_collection", labelFR: "Ramassage d'ordures 🗑️", labelEN: "Trash collection 🗑️", cat: ServiceCategory.HOME_HELP },
+  { id: "content_creation", labelFR: "Créateur de contenu / Sono / Photo 📸", labelEN: "Content creation / Photo / Sound 📸", cat: ServiceCategory.EDUCATION },
+  { id: "buy_sell_gadgets", labelFR: "Vente/Achat Gadgets & Électronique 🔌", labelEN: "Gadgets buy/sell 🔌", cat: ServiceCategory.EDUCATION },
 ];
 
 export const INITIAL_PROVIDERS: ServiceProvider[] = [

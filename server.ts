@@ -7,24 +7,79 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { ServiceProvider, ServiceCategory, PromotedAd } from "./src/types.ts";
+import { CATEGORY_DETAILS, SUB_CATEGORIES } from "./src/data/bertouaData.ts";
 
+// Plain dotenv.config() only ever loads a file literally named ".env", which doesn't exist in
+// this project — GEMINI_API_KEY (and everything else) actually lives in .env.local, matching
+// Vite's own frontend convention. Without this, the server silently ran in "mock mode" forever
+// even with a real key configured, since process.env.GEMINI_API_KEY was simply never populated.
 dotenv.config();
+dotenv.config({ path: ".env.local", override: true });
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-// TEMPORARY: interim admin gate until Step 3 wires real Supabase auth with JWT verification.
-// Trusts an "x-user-role" header set by the frontend from the current logged-in user's session,
-// which is not verifiable server-side yet and must not be relied on once real auth is in place.
-function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (req.headers["x-user-role"] !== "admin") {
-    return res.status(403).json({ error: "Admin access required." });
+// Lazy-loaded Supabase admin client, using the service role key (server-only — it must never be
+// VITE_-prefixed or it would get bundled into the client). Used to verify the caller's JWT and look
+// up their role directly, bypassing RLS, since this is the trusted server-side admin boundary.
+let supabaseAdmin: SupabaseClient | null = null;
+function getSupabaseAdmin(): SupabaseClient | null {
+  if (!supabaseAdmin) {
+    const url = process.env.VITE_SUPABASE_URL;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !serviceRoleKey) {
+      console.warn("VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not defined. Admin routes will reject all requests.");
+      return null;
+    }
+    supabaseAdmin = createClient(url, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
   }
-  next();
+  return supabaseAdmin;
+}
+
+// Verifies the Supabase JWT sent in the Authorization header server-side (via the service role
+// key), then looks up that user's role in profiles. Only requests from a user whose profile has
+// role = 'admin' are allowed through — replaces the old client-trusted "x-user-role" header, which
+// any caller could have set to anything.
+async function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ error: "Missing bearer token." });
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return res.status(503).json({ error: "Admin verification is not configured." });
+  }
+
+  try {
+    const { data: { user }, error: userError } = await admin.auth.getUser(token);
+    if (userError || !user) {
+      return res.status(401).json({ error: "Invalid or expired session." });
+    }
+
+    const { data: profile, error: profileError } = await admin
+      .from("profiles")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+
+    if (profileError || !profile || profile.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required." });
+    }
+
+    next();
+  } catch (err) {
+    console.error("requireAdmin verification failed:", err);
+    res.status(500).json({ error: "Admin verification failed." });
+  }
 }
 
 app.use("/api/admin", requireAdmin);
@@ -48,6 +103,177 @@ function getGeminiClient() {
     });
   }
   return aiInstance;
+}
+
+// --- AI guide performance/reliability helpers (Part A) ---
+
+const GEMINI_TIMEOUT_MS = 18000;
+
+// Races a promise against a hard timeout. Doesn't actually cancel the underlying Gemini request
+// (the SDK gives us no cancellation hook), but it does guarantee the user gets a timely response
+// either way — an orphaned request that finishes late is simply ignored.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err: any = new Error(`${label} timed out after ${ms}ms`);
+      err.code = "TIMEOUT";
+      reject(err);
+    }, ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
+// Gemini quota/rate-limit errors surface as HTTP 429 (sometimes wrapped, sometimes with a
+// RESOURCE_EXHAUSTED message) — detected distinctly so callers can show "too many requests" rather
+// than a generic failure, and so retry logic below skips them (retrying a quota error just burns
+// more of the same exhausted quota).
+function isQuotaError(err: any): boolean {
+  const status = err?.status ?? err?.code;
+  const message = String(err?.message || err || "");
+  return status === 429 || /\b429\b|quota|resource_exhausted/i.test(message);
+}
+
+// Wraps a Gemini generateContent call with a hard timeout and one retry after a short delay for
+// transient failures (network blips, 5xx). Quota errors and timeouts are NOT retried — a quota
+// error will just fail again immediately, and retrying a timeout would double the user's wait for
+// a request that's already slow.
+async function generateContentWithResilience(ai: any, params: any, label: string): Promise<any> {
+  try {
+    return await withTimeout(ai.models.generateContent(params), GEMINI_TIMEOUT_MS, label);
+  } catch (err: any) {
+    if (isQuotaError(err) || err?.code === "TIMEOUT") throw err;
+    console.warn(`[${label}] Gemini call failed transiently, retrying once — status: ${err?.status ?? "n/a"}, message: ${err?.message || err}`);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    return await withTimeout(ai.models.generateContent(params), GEMINI_TIMEOUT_MS, `${label} (retry)`);
+  }
+}
+
+// Part A, Item 1: only fetch/include the job-postings context block when the user's message
+// actually looks work/employment-related — kept as a simple keyword check, not a second AI call.
+function isJobRelatedQuery(text: string): boolean {
+  return /emploi|travail|job|embauch|recrut|postul|cherche du travail|cv\b|carri[eè]re|hiring|work\b|career/i.test(text);
+}
+
+// Fetches the LIVE category list straight from service_categories on every call — built-in
+// categories AND any admin-approved "Autre" suggestion (e.g. "Informatique (TIC)") — so a
+// newly-approved category is reflected in the AI's grounding immediately, with no server restart.
+// Returns [] if Supabase isn't configured or the query fails; callers fall back to the static
+// built-in ServiceCategory enum in that case (same behavior as before this existed).
+async function fetchLiveCategories(): Promise<Array<{ slug: string; nameFr: string; nameEn: string }>> {
+  const admin = getSupabaseAdmin();
+  if (!admin) return [];
+  try {
+    const { data, error } = await admin
+      .from("service_categories")
+      .select("slug, name_fr, name_en")
+      .order("name_fr", { ascending: true });
+    if (error || !data) return [];
+    return data
+      .filter((row: any) => !!row.slug)
+      .map((row: any) => ({ slug: row.slug, nameFr: row.name_fr, nameEn: row.name_en }));
+  } catch (err) {
+    console.error("Failed to fetch live service_categories for AI grounding, falling back to static list:", err);
+    return [];
+  }
+}
+
+// Fetches a live sample of real approved providers (public_provider_cards) for AI grounding, so the
+// prompt's example set includes providers that actually registered — including under a brand new
+// category — rather than only the static mock providers below. Returns [] if Supabase isn't
+// configured or the query fails; callers fall back to the mock `providers` array sample.
+async function fetchLiveProviderSample(
+  limit: number
+): Promise<Array<{ name: string; businessName?: string; category: string; neighborhoodId: string; description: string }>> {
+  const admin = getSupabaseAdmin();
+  if (!admin) return [];
+  try {
+    const { data, error } = await admin
+      .from("public_provider_cards")
+      .select("provider_name, business_name, description_fr, category_slugs, neighborhood_id")
+      .limit(limit);
+    if (error || !data) return [];
+    return data.map((row: any) => ({
+      name: row.provider_name,
+      businessName: row.business_name || undefined,
+      category: (row.category_slugs && row.category_slugs[0]) || "",
+      neighborhoodId: row.neighborhood_id,
+      description: row.description_fr || "",
+    }));
+  } catch (err) {
+    console.error("Failed to fetch live provider sample for AI grounding, falling back to mock providers:", err);
+    return [];
+  }
+}
+
+// Builds a French-language summary of the category/sub-category list so AI prompts are grounded in
+// what actually exists in the app instead of relying on Gemini's own (potentially incomplete or
+// hallucinated) idea of what's available. Prefers the live list (see fetchLiveCategories above);
+// falls back to the static built-in ServiceCategory enum only when Supabase isn't reachable.
+function buildCategoryContextBlock(liveCategories: Array<{ slug: string; nameFr: string; nameEn: string }>): string {
+  const slugs = liveCategories.length > 0 ? liveCategories.map((c) => c.slug) : Object.values(ServiceCategory);
+  return slugs
+    .map((slug) => {
+      const builtIn = CATEGORY_DETAILS[slug as ServiceCategory] as { nameFR: string; descriptionFR: string } | undefined;
+      const live = liveCategories.find((c) => c.slug === slug);
+      const nameFr = builtIn?.nameFR || live?.nameFr || slug;
+      const descriptionFr = builtIn?.descriptionFR || nameFr;
+      const subs = SUB_CATEGORIES.filter((s) => s.cat === slug).map((s) => s.labelFR.replace(/[^\p{L}\s&/()'-]/gu, "").trim());
+      return `- ${slug} (${nameFr}): ${descriptionFr}${subs.length ? ` — métiers spécifiques : ${subs.join(", ")}` : ""}`;
+    })
+    .join("\n");
+}
+
+// Builds a short summary of a handful of real providers for grounding. Keeps the prompt honest
+// about what's actually in the directory rather than letting the model invent plausible-sounding
+// but fictional services. Accepts either the live fetchLiveProviderSample() result or the static
+// mock `providers` array (both share these 5 fields).
+function buildProviderSampleBlock(
+  providerList: Array<{ name: string; businessName?: string; category: string; neighborhoodId: string; description: string }>
+): string {
+  return providerList
+    .slice(0, 8)
+    .map((p) => `- ${p.name}${p.businessName ? ` (${p.businessName})` : ""} — ${p.category}, ${p.neighborhoodId} : "${p.description.slice(0, 100)}"`)
+    .join("\n");
+}
+
+// Part 1, Item 3: lightweight AI guide awareness of open job postings. Deliberately simple — a
+// handful of real open postings, queried fresh on every request (same live-grounding pattern as
+// categories/providers above), with no dedicated "find me a job" task branch. Just enough so the
+// assistant can mention a real opening instead of only pointing at service categories.
+async function fetchOpenJobSample(limit: number): Promise<Array<{ title: string; employmentType: string; neighborhoodId: string | null; categorySlug: string | null }>> {
+  const admin = getSupabaseAdmin();
+  if (!admin) return [];
+  try {
+    const { data, error } = await admin
+      .from("job_postings")
+      .select("title, employment_type, neighborhood_id, service_categories ( slug )")
+      .eq("status", "open")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error || !data) return [];
+    return data.map((row: any) => {
+      const category = Array.isArray(row.service_categories) ? row.service_categories[0] : row.service_categories;
+      return {
+        title: row.title,
+        employmentType: row.employment_type,
+        neighborhoodId: row.neighborhood_id,
+        categorySlug: category?.slug || null,
+      };
+    });
+  } catch (err) {
+    console.error("Failed to fetch live job sample for AI grounding:", err);
+    return [];
+  }
+}
+
+function buildJobContextBlock(jobs: Array<{ title: string; employmentType: string; neighborhoodId: string | null; categorySlug: string | null }>): string {
+  if (jobs.length === 0) return "";
+  return jobs
+    .map((j) => `- ${j.title} (${j.employmentType}${j.categorySlug ? `, ${j.categorySlug}` : ""}${j.neighborhoodId ? `, ${j.neighborhoodId}` : ""})`)
+    .join("\n");
 }
 
 // In-Memory Database
@@ -131,7 +357,7 @@ const providers: ServiceProvider[] = [
     reviewCount: 18,
     verified: false,
     available: true,
-    bannerUrl: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=600&q=80",
+    bannerUrl: "/images/providers/macon-bricklayer.jpg",
     city: "Bertoua",
     bookingsCount: 12,
     recencyScore: 0.5,
@@ -175,33 +401,6 @@ const bookings: any[] = [
     paymentMethod: "MTN_MOMO",
     paymentPhone: "+237 671 22 33 44",
     createdAt: "2026-07-09T10:00:00Z",
-  }
-];
-
-const ads = [
-  {
-    id: "ad1",
-    title: "Urgent : Labour d'un demi-hectare de manioc",
-    description: "Recherche agriculteur vigoureux pour préparer la terre avant le retour des pluies la semaine prochaine. Terrain situé près du fleuve à Ndouan.",
-    category: "AGRICULTURE",
-    neighborhoodId: "ndouan",
-    authorName: "Ernestine Ndengue",
-    authorPhone: "+237 673 45 90 22",
-    budgetFCFA: 35000,
-    createdAt: "2026-07-08T09:00:00Z",
-    urgency: "HIGH",
-  },
-  {
-    id: "ad2",
-    title: "Recherche couturière pour 5 tenues de fête scolaires",
-    description: "Besoin de confectionner des tenues d'élèves uniformes pour un événement culturel d'école à Yademe. Tissu fourni.",
-    category: "TAILORING",
-    neighborhoodId: "yademe",
-    authorName: "Directrice Marie-Claire",
-    authorPhone: "+237 691 12 87 55",
-    budgetFCFA: 40000,
-    createdAt: "2026-07-09T08:30:00Z",
-    urgency: "MEDIUM",
   }
 ];
 
@@ -257,22 +456,33 @@ app.post("/api/ai-search", async (req, res) => {
   let categoryMatch = "";
   let fallbackExplanation = "Je n'ai pas pu identifier la catégorie exacte, voici tous nos prestataires disponibles.";
 
-  // Rule-based classifier
-  if (queryLower.match(/(manioc|champ|terre|agri|labour|plante|cacao|banane|ferme|sol|cultiv)/)) {
+  // Rule-based classifier — covers all 8 real top-level categories (previously only 5 were
+  // handled, so queries like "mon frigo ne refroidit plus" or anything health/education/home-help
+  // related had no fallback match at all when Gemini wasn't available or disagreed).
+  if (queryLower.match(/(manioc|champ|terre|agri|labour|plante|cacao|banane|ferme|sol|cultiv|bétail|élevage|volaille)/)) {
     categoryMatch = "AGRICULTURE";
     fallbackExplanation = "C'est parfait ! Notre guide suggère la catégorie Agriculture pour préparer vos sols ou cultiver vos parcelles.";
-  } else if (queryLower.match(/(moto|taxi|course|livr|transport|bagage|moto-taxi|camion|déplace)/)) {
+  } else if (queryLower.match(/(moto|taxi|course|livr|transport|bagage|moto-taxi|camion|déplace|colis|marchandise)/)) {
     categoryMatch = "TRANSPORT";
     fallbackExplanation = "En route ! Notre guide suggère la catégorie Transport & Moto-Taxi pour vos courses rapides à Bertoua.";
-  } else if (queryLower.match(/(couture|couturi|robe|pagne|habill|mesure|tissu|uniforme|fête)/)) {
-    categoryMatch = "TAILORING";
-    fallbackExplanation = "Élégant ! Notre guide vous conseille la catégorie Couture & Mode pour confectionner vos magnifiques pagnes.";
-  } else if (queryLower.match(/(maçon|brique|construct|ciment|maison|rénov|mur|bâtiment|fondation)/)) {
-    categoryMatch = "CONSTRUCTION";
-    fallbackExplanation = "Solide ! Notre guide vous oriente vers la catégorie Construction & Maçonnerie pour vos travaux d'habitation.";
+  } else if (queryLower.match(/(ménage|nettoy|lessive|blanchisserie|pressing|cuisine|ordure|poubelle|déchet)/)) {
+    categoryMatch = "HOME_HELP";
+    fallbackExplanation = "Notre guide suggère la catégorie Aide à domicile & Ménage pour ce type de besoin.";
   } else if (queryLower.match(/(bébé|enfant|garde|nounou|maman|crèche|maternelle|garderie)/)) {
     categoryMatch = "CHILDCARE";
     fallbackExplanation = "Sûr ! Notre guide vous propose la catégorie Garde d'enfants pour trouver des mamans de confiance.";
+  } else if (queryLower.match(/(maçon|brique|construct|ciment|maison|rénov|mur|bâtiment|fondation|électric|plomb|menuis|charpente)/)) {
+    categoryMatch = "CONSTRUCTION";
+    fallbackExplanation = "Solide ! Notre guide vous oriente vers la catégorie Bâtiment & Maçonnerie pour vos travaux d'habitation.";
+  } else if (queryLower.match(/(couture|couturi|robe|pagne|habill|mesure|tissu|uniforme|fête|chaussure|cordonn)/)) {
+    categoryMatch = "TAILORING";
+    fallbackExplanation = "Élégant ! Notre guide vous conseille la catégorie Couture & Mode pour vos besoins vestimentaires.";
+  } else if (queryLower.match(/(répétit|cours|école|examen|informatique|ordinateur|réseau|juridique|avocat|droit|contenu|photo|vidéo|communication|gadget)/)) {
+    categoryMatch = "EDUCATION";
+    fallbackExplanation = "Notre guide suggère la catégorie Soutien Scolaire (elle couvre aussi l'informatique, le contenu numérique et les conseils juridiques) pour ce besoin.";
+  } else if (queryLower.match(/(santé|soin|malade|infirmi|tisane|massage|frigo|réfrigérateur|climatisation|congélateur|téléphone|télé|télévision|dépannage|électronique)/)) {
+    categoryMatch = "HEALTH";
+    fallbackExplanation = "Notre guide suggère la catégorie Santé & Soins (elle couvre aussi la réparation de frigos, téléphones et téléviseurs) pour ce besoin.";
   }
 
   const ai = getGeminiClient();
@@ -281,13 +491,31 @@ app.post("/api/ai-search", async (req, res) => {
 
   if (ai) {
     try {
-      const systemInstruction = `Tu es l'Animateur One Village à Bertoua. Ton rôle est de faire correspondre la requête de l'utilisateur avec l'une de ces catégories : 'AGRICULTURE', 'TRANSPORT', 'TAILORING', 'CONSTRUCTION', 'CHILDCARE'.
+      // Fetched fresh on every request (Item 6: AI guide live grounding) — a category approved
+      // moments ago, or a provider who just registered, is immediately visible here with no server
+      // restart. Falls back to the static built-in list/mock providers if Supabase isn't reachable.
+      // Part A, Item 1: capped at 5 providers (was 8) to keep the prompt lean.
+      const liveCategories = await fetchLiveCategories();
+      const liveProviderSample = await fetchLiveProviderSample(5);
+      const validCategorySlugs = liveCategories.length > 0 ? liveCategories.map((c) => c.slug) : Object.values(ServiceCategory);
+      const categoryContext = buildCategoryContextBlock(liveCategories);
+      const providerSample = buildProviderSampleBlock(liveProviderSample.length > 0 ? liveProviderSample : providers);
+      const systemInstruction = `Tu es "Assistant One Village" à Bertoua. Ton rôle est de faire correspondre la requête de l'utilisateur avec l'une des catégories RÉELLES de la plateforme, listées ci-dessous avec leurs métiers spécifiques :
+${categoryContext}
+
+Voici un échantillon de prestataires réellement inscrits sur la plateforme, pour t'aider à donner des réponses concrètes plutôt que génériques :
+${providerSample}
+
 Retourne STRICTEMENT un objet JSON avec les clés suivantes :
-- category: l'un des mots exacts en majuscules listés ci-dessus (ou "" si aucun ne correspond)
-- explanation: une phrase chaleureuse en français qui explique pourquoi cette catégorie correspond et encourage l'entraide communautaire.
+- category: le mot-clé exact en majuscules parmi ${validCategorySlugs.join(", ")} qui correspond le mieux (ou "" si aucun ne correspond vraiment)
+- explanation: UNE SEULE phrase courte (pas plus de 20 mots) en français, ton amical et direct, qui dit pourquoi cette catégorie correspond (en citant le métier précis si pertinent). Si aucune catégorie ne correspond vraiment, dis-le simplement en une phrase, sans forcer une suggestion non pertinente. N'utilise aucune expression religieuse, bénédiction, ou terme comme "mon enfant" — reste professionnel et chaleureux, pas paternaliste.
 Ne mets pas de texte avant ou après le bloc de code JSON.`;
 
-      const response = await ai.models.generateContent({
+      // Part A, Items 2-4: hard timeout + one retry for transient failures (not quota errors),
+      // logged server-side with status/message. ai-search already falls back gracefully to the
+      // regex-based classifier on any failure (see catch below), so this just bounds how long that
+      // fallback takes to kick in instead of risking a long hang first.
+      const response = await generateContentWithResilience(ai, {
         model: "gemini-3.5-flash",
         contents: `Requête de l'utilisateur : "${query}"`,
         config: {
@@ -295,7 +523,7 @@ Ne mets pas de texte avant ou après le bloc de code JSON.`;
           responseMimeType: "application/json",
           temperature: 0.3,
         },
-      });
+      }, "ai-search");
 
       if (response.text) {
         const parsed = JSON.parse(response.text.trim());
@@ -304,8 +532,13 @@ Ne mets pas de texte avant ou après le bloc de code JSON.`;
           explanationResult = parsed.explanation;
         }
       }
-    } catch (err) {
-      console.error("Gemini category matcher failed, using fallback regex:", err);
+    } catch (err: any) {
+      // Part A, Item 4: log enough to diagnose from server logs (status/code, message, which
+      // failure mode) — the user never sees this since the regex-based fallback above already
+      // covers it silently.
+      console.error(
+        `[ai-search] Gemini call failed — ${err?.code === "TIMEOUT" ? "TIMEOUT" : isQuotaError(err) ? "QUOTA/429" : "ERROR"}, status: ${err?.status ?? "n/a"}, message: ${err?.message || err}. Falling back to regex classifier.`
+      );
     }
   }
 
@@ -358,41 +591,17 @@ app.post("/api/providers", (req, res) => {
   res.status(201).json(newProvider);
 });
 
-// Bookings list & creation
-app.get("/api/bookings", (req, res) => {
-  res.json(bookings);
-});
+// NOTE: the plain GET/POST /api/bookings routes that used to live here were removed — booking
+// creation and the client-facing bookings list are now wired directly to Supabase (see
+// src/components/BookingModal.tsx and src/components/Dashboard.tsx). The `bookings` in-memory
+// array below is intentionally kept: it still backs the provider-mode demo simulator, the chat
+// auto-booking-on-agreement feature, the admin dispute panel (/api/admin/bookings and
+// force-action below), and provider popularity/trending stats — none of those were part of this
+// pass. GET /api/admin/bookings (further below) is a separate route and is unaffected.
 
-app.post("/api/bookings", (req, res) => {
-  const { providerId, providerName, customerName, customerPhone, category, serviceDate, serviceTime, description, estimatedFCFA, paymentMethod, paymentPhone } = req.body;
-  if (!providerId || !customerName || !customerPhone || !serviceDate || !estimatedFCFA) {
-    return res.status(400).json({ error: "Missing required booking fields." });
-  }
+// Real-time double-sided completion endpoint — still used by the admin dispute "force complete"
+// action and the provider-mode demo simulator in Dashboard.tsx (both against the mock array above).
 
-  const isCash = paymentMethod === "CASH";
-  const newBooking = {
-    id: `b_${Date.now()}`,
-    providerId,
-    providerName,
-    customerName,
-    customerPhone,
-    category,
-    serviceDate,
-    serviceTime: serviceTime || "12:00",
-    description: description || "",
-    estimatedFCFA: Number(estimatedFCFA),
-    status: isCash ? "ACCEPTED" : "PENDING",
-    paymentMethod: paymentMethod || undefined,
-    paymentPhone: paymentPhone || undefined,
-    clientCompleted: false,
-    providerCompleted: false,
-    createdAt: new Date().toISOString(),
-  };
-  bookings.unshift(newBooking);
-  res.status(201).json(newBooking);
-});
-
-// Real-time double-sided completion endpoint
 app.post("/api/bookings/:id/confirm-completion", (req, res) => {
   const { id } = req.params;
   const { role } = req.body; // "client" | "provider"
@@ -424,7 +633,9 @@ app.post("/api/bookings/:id/confirm-completion", (req, res) => {
   res.json({ success: true, booking });
 });
 
-// Update booking status directly (e.g. accepted, cancelled)
+// Update booking status directly (e.g. accepted, cancelled) — still used by the admin dispute
+// "force cancel" action and the provider-mode demo simulator, both against the mock array above.
+// The real client/provider dashboards now call supabaseService.updateBookingStatus() instead.
 app.patch("/api/bookings/:id/status", (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -492,22 +703,6 @@ const reviews: Review[] = [
   }
 ];
 
-const lastReviewSubmission: Record<string, number> = {};
-
-const PROFANITIES = [
-  "salopard", "connard", "vautour", "idiot", "arnaque", "bête", "cochon", 
-  "scam", "shitty", "bastard", "imbécile", "stupid", "fraud"
-];
-
-function filterProfanity(text: string): string {
-  let cleaned = text;
-  PROFANITIES.forEach(word => {
-    const regex = new RegExp(`\\b${word}\\b`, "gi");
-    cleaned = cleaned.replace(regex, "***");
-  });
-  return cleaned;
-}
-
 const profileViews: Record<string, { today: number; week: number; month: number }> = {
   "p1": { today: 8, week: 42, month: 152 },
   "p2": { today: 15, week: 94, month: 310 },
@@ -567,95 +762,12 @@ setTimeout(recalculatePopularity, 1000);
 // Emulate daily schedule (refresh daily)
 setInterval(recalculatePopularity, 24 * 60 * 60 * 1000);
 
-// Fetch reviews for a provider
-app.get("/api/providers/:id/reviews", (req, res) => {
-  const { id } = req.params;
-  const filtered = reviews.filter(r => r.providerId === id).map(rev => {
-    // Check if customer has completed bookings
-    const b = bookings.find(bk => bk.id === rev.bookingId);
-    const hasCompleted = b ? bookings.some(bk => bk.customerPhone === b.customerPhone && bk.status === "COMPLETED") : true;
-    return {
-      ...rev,
-      isTrustedReviewer: hasCompleted
-    };
-  });
-  res.json(filtered);
-});
-
-// Submit Rating & Review (Phase 9 Integration)
-app.post("/api/providers/:id/reviews", (req, res) => {
-  const { id } = req.params;
-  const { rating, text, reviewerName, bookingId } = req.body;
-
-  const provider = providers.find(p => p.id === id);
-  if (!provider) {
-    return res.status(404).json({ error: "Provider not found" });
-  }
-
-  // 1. One rating per booking protection
-  if (bookingId) {
-    const alreadyRated = reviews.some(r => r.bookingId === bookingId);
-    if (alreadyRated) {
-      return res.status(400).json({ error: "Vous avez déjà évalué cette prestation." });
-    }
-  }
-
-  // 2. Rate-limiting check (10 seconds between submissions)
-  const clientIdentifier = String(req.headers["x-user-id"] || req.ip || "unknown");
-  const now = Date.now();
-  if (lastReviewSubmission[clientIdentifier] && now - lastReviewSubmission[clientIdentifier] < 10000) {
-    return res.status(429).json({ error: "Veuillez patienter 10 secondes entre chaque évaluation." });
-  }
-  lastReviewSubmission[clientIdentifier] = now;
-
-  // 3. Profanity filter on text
-  const cleanComment = text ? filterProfanity(text) : "";
-
-  // 4. Save review
-  const newReview: Review = {
-    id: `rev_${Date.now()}`,
-    providerId: id,
-    bookingId: bookingId || `b_ext_${Date.now()}`,
-    rating: Number(rating) || 5,
-    text: cleanComment,
-    reviewerName: reviewerName || "Client de Bertoua",
-    createdAt: new Date().toISOString()
-  };
-  reviews.unshift(newReview);
-
-  // 5. Trigger update average rating & count on service_provider for fast sorting/filtering
-  const providerReviews = reviews.filter(r => r.providerId === id);
-  const totalRating = providerReviews.reduce((sum, r) => sum + r.rating, 0);
-  
-  provider.reviewCount = providerReviews.length;
-  provider.rating = Number((totalRating / providerReviews.length).toFixed(1));
-
-  // Trigger popularity recalculation
-  recalculatePopularity();
-
-  res.json({ success: true, provider, review: newReview });
-});
-
-// Provider respond to review (Phase 9)
-app.post("/api/reviews/:reviewId/response", (req, res) => {
-  const { reviewId } = req.params;
-  const { responseText } = req.body;
-
-  if (!responseText || !responseText.trim()) {
-    return res.status(400).json({ error: "Le texte de réponse est requis." });
-  }
-
-  const review = reviews.find(r => r.id === reviewId);
-  if (!review) {
-    return res.status(404).json({ error: "Review not found" });
-  }
-
-  // Apply profanity filtering to the response as well
-  review.response = filterProfanity(responseText);
-  review.responseCreatedAt = new Date().toISOString();
-
-  res.json({ success: true, review });
-});
+// NOTE: the old GET/POST /api/providers/:id/reviews and POST /api/reviews/:reviewId/response
+// routes were removed here — ratings are now wired directly to Supabase (see
+// supabaseService.submitRating/getProviderRatings/respondToRating and the
+// 20260715020000_chat_realtime_and_ratings.sql migration). The mock `reviews` array below is kept:
+// the admin moderation/flagging endpoints further down still operate on it, which wasn't part of
+// this pass.
 
 // Track profile view
 app.post("/api/providers/:id/view", (req, res) => {
@@ -677,242 +789,24 @@ app.get("/api/cron/refresh-popularity", (req, res) => {
   res.json({ success: true, message: "Service popularity statistics aggregated successfully!" });
 });
 
-// Mobile Money Webhook endpoint
-app.post("/api/momo/webhook", (req, res) => {
-  const { transactionId, status, bookingId } = req.body;
-  console.log(`[MoMo Webhook received] Tx: ${transactionId}, Status: ${status}, Booking: ${bookingId}`);
+// NOTE: the old /api/momo/webhook and POST /api/bookings/:id/pay simulation endpoints were
+// removed here — they only ever served BookingModal's old fake USSD/PIN payment step, which no
+// longer exists (Mobile Money is now an honest "coming soon" notice; both cash and mobile_money
+// bookings flow through the same real two-sided completion confirmation — see BookingModal.tsx
+// and the 20260715010000 migration).
 
-  const booking = bookings.find(b => b.id === bookingId);
-  if (booking) {
-    if (status === "SUCCESSFUL") {
-      booking.status = "PAID";
-      booking.momoTransactionId = transactionId;
-    } else {
-      booking.status = "CANCELLED";
-    }
-    return res.json({ success: true, message: "Booking updated via Webhook" });
-  }
-  res.status(404).json({ error: "Booking not found" });
-});
+// NOTE: /api/ads (GET/POST) was removed here — community ads now read/write directly against the
+// real community_ads table (see supabaseService.getCommunityAds/createCommunityAd/updateCommunityAd
+// /setCommunityAdStatus/deleteCommunityAd and AdBoard.tsx), so this in-memory mock has no callers
+// left at all.
 
-// Simulate Mobile Money Payment Request with real API capability/fallback
-app.post("/api/bookings/:id/pay", async (req, res) => {
-  const { id } = req.params;
-  const { paymentMethod, paymentPhone } = req.body;
-  
-  const booking = bookings.find(b => b.id === id);
-  if (!booking) {
-    return res.status(404).json({ error: "Booking not found" });
-  }
-
-  if (!paymentMethod || !paymentPhone) {
-    return res.status(400).json({ error: "Missing payment method or phone number" });
-  }
-
-  const amount = booking.estimatedFCFA;
-  const isMTN = paymentMethod === "MTN_MOMO";
-  const mtnUrl = "https://sandbox.momodeveloper.mtn.com/collection/v1_0/requesttopay";
-  const orangeUrl = "https://api.orange.com/orange-money-webpay/cm/v1/webpayment";
-
-  console.log(`[MoMo Payment Request] Initializing for ${paymentMethod} to ${paymentPhone} of amount ${amount}`);
-
-  // Sandbox external HTTP client calls if keys are defined
-  const mtnKey = process.env.MTN_MOMO_API_KEY;
-  const orangeKey = process.env.ORANGE_MONEY_API_KEY;
-
-  if (isMTN && mtnKey) {
-    try {
-      const response = await fetch(mtnUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${mtnKey}`,
-          "X-Reference-Id": id,
-          "X-Target-Environment": "sandbox",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          amount: amount.toString(),
-          currency: "XAF",
-          externalId: id,
-          payer: { partyIdType: "MSISDN", partyId: paymentPhone },
-          payerMessage: "One Village Booking Payment",
-          payeeNote: "Payment to provider"
-        })
-      });
-      console.log("MTN MoMo Sandbox request status:", response.status);
-    } catch (err) {
-      console.error("Failed to connect to real MTN Sandbox:", err);
-    }
-  }
-
-  // Fallback simulator USSD Push Notification on Cameroon numbers
-  const transactionId = `TX_${isMTN ? "MTN" : "ORANGE"}_${Math.floor(100000 + Math.random() * 900000)}`;
-  
-  // Accept the payment in-memory
-  booking.status = "PAID";
-  booking.paymentMethod = paymentMethod;
-  booking.paymentPhone = paymentPhone;
-  booking.momoTransactionId = transactionId;
-
-  // Simulate server receiving Webhook Callback automatically after 2 seconds
-  setTimeout(async () => {
-    try {
-      await fetch(`http://localhost:${PORT}/api/momo/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transactionId,
-          status: "SUCCESSFUL",
-          bookingId: id
-        })
-      });
-    } catch (e) {
-      console.error("Local webhook loop failed:", e);
-    }
-  }, 2000);
-
-  res.json({
-    success: true,
-    message: `Payment request pushed to phone ${paymentPhone}. Transaction ${transactionId} confirmed.`,
-    booking,
-  });
-});
-
-// Community Ads list & posting
-app.get("/api/ads", (req, res) => {
-  res.json(ads);
-});
-
-app.post("/api/ads", (req, res) => {
-  const { title, description, category, neighborhoodId, authorName, authorPhone, budgetFCFA, urgency } = req.body;
-  if (!title || !description || !category || !neighborhoodId || !authorName || !authorPhone || !budgetFCFA) {
-    return res.status(400).json({ error: "Missing required ad fields." });
-  }
-  const newAd = {
-    id: `ad_${Date.now()}`,
-    title,
-    description,
-    category,
-    neighborhoodId,
-    authorName,
-    authorPhone,
-    budgetFCFA: Number(budgetFCFA),
-    createdAt: new Date().toISOString(),
-    urgency: urgency || "MEDIUM",
-  };
-  ads.unshift(newAd);
-  res.status(201).json(newAd);
-});
-
-// Chats
-app.get("/api/chats/:providerId", (req, res) => {
-  const { providerId } = req.params;
-  res.json(chats[providerId] || []);
-});
-
-app.post("/api/chats/:providerId", async (req, res) => {
-  const { providerId } = req.params;
-  const { text, imageUrl, audioUrl, proposal } = req.body;
-  if (!text && !imageUrl && !audioUrl && !proposal) {
-    return res.status(400).json({ error: "Message text, image, audio or proposal required." });
-  }
-
-  if (!chats[providerId]) {
-    chats[providerId] = [];
-  }
-
-  // Save customer message
-  const userMsg: any = {
-    id: `msg_${Date.now()}_u`,
-    sender: "customer",
-    text: text || (proposal ? `[PROPOSITION] Travail demandé le ${proposal.date} à ${proposal.time} pour ${proposal.price} FCFA` : ""),
-    imageUrl: imageUrl || undefined,
-    audioUrl: audioUrl || undefined,
-    proposal: proposal || undefined,
-    status: "read",
-    createdAt: new Date().toISOString()
-  };
-  chats[providerId].push(userMsg);
-
-  // Generate automated reply from provider using provider context!
-  const provider = providers.find(p => p.id === providerId);
-  const providerName = provider ? provider.name : "Prestataire";
-  const providerDesc = provider ? provider.description : "Je suis disponible pour vous aider.";
-  const providerRate = provider ? `${provider.rateFCFA} FCFA par ${provider.rateUnit}` : "tarif à convenir";
-
-  // Check if AI client is available to write a realistic response, else fallback to templates
-  const ai = getGeminiClient();
-  let replyText = `Bonjour ! Merci pour votre message. Je suis bien ${providerName}. Concernant votre demande, je suis généralement disponible. Discutons des détails et du tarif (${providerRate}).`;
-
-  if (proposal) {
-    const pPrice = Number(proposal.price) || 0;
-    if (pPrice < 1000) {
-      replyText = `Mon frère, ${pPrice} FCFA c'est un peu bas pour ce travail. Est-ce qu'on peut s'entendre sur ${provider ? provider.rateFCFA : 3000} FCFA ?`;
-    } else {
-      replyText = `D'accord, c'est parfait ! J'accepte ta proposition de contrat de ${pPrice} FCFA pour le ${proposal.date} à ${proposal.time}. Travaillons ensemble, on est ensemble !`;
-      
-      // Auto-create active booking agreed in chat!
-      const newBooking = {
-        id: `b_chat_${Date.now()}`,
-        providerId: providerId,
-        providerName: providerName,
-        customerName: "Client de discussion",
-        customerPhone: "+237 600 00 00 00",
-        category: provider ? provider.category : "TRANSPORT",
-        serviceDate: proposal.date,
-        serviceTime: proposal.time,
-        description: proposal.description || "Contrat convenu en discussion",
-        estimatedFCFA: pPrice,
-        status: "ACCEPTED", // Immediately accepted since agreed in chat!
-        paymentMethod: "CASH", // Cash default, can be paid via MoMo on dashboard
-        clientCompleted: false,
-        providerCompleted: false,
-        createdAt: new Date().toISOString(),
-      };
-      bookings.unshift(newBooking);
-    }
-  } else if (imageUrl) {
-    replyText = `Merci pour la photo de référence ! C'est très clair, je peux tout à fait réaliser ce travail. Discutons ensemble des modalités pour débuter à ${provider ? provider.neighborhoodId : "Bertoua"}.`;
-  } else if (audioUrl) {
-    replyText = `Bien reçu votre message vocal mon frère ! On est ensemble, j'ai tout écouté et je suis disponible pour cette tâche à ${providerRate}.`;
-  } else if (ai) {
-    try {
-      const systemInstruction = `Tu incarnes ${providerName}, un prestataire de services local à Bertoua, au Cameroun. 
-Ton profil est : "${providerDesc}". Ton tarif est de ${providerRate}.
-Réponds au client de manière polie, accueillante et chaleureuse dans un style camerounais authentique mais professionnel (utilise un français simple, chaleureux, parfois agrémenté d'expressions comme 'on est ensemble', 'pas de souci mon frère/ma soeur', etc.). 
-Sois bref (1-3 phrases maximum) et demande-lui d'en dire plus sur son besoin ou de confirmer une date d'intervention. Si le message est en anglais ou dans une autre langue, réponds de manière adaptée.`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: [
-          { role: "user", parts: [{ text: `Le client dit : "${text}"` }] }
-        ],
-        config: {
-          systemInstruction,
-          temperature: 0.7,
-        },
-      });
-
-      if (response.text) {
-        replyText = response.text.trim();
-      }
-    } catch (err) {
-      console.error("Error generating provider chat reply via Gemini:", err);
-    }
-  }
-
-  // Save provider reply (with 1-second delay simulated in client, but saved immediately on server)
-  const replyMsg = {
-    id: `msg_${Date.now()}_p`,
-    sender: "provider",
-    text: replyText,
-    status: "read",
-    createdAt: new Date(Date.now() + 500).toISOString()
-  };
-  chats[providerId].push(replyMsg);
-
-  res.json({ userMsg, replyMsg });
-});
+// NOTE: the old GET/POST /api/chats/:providerId routes (including the AI-simulated provider
+// auto-reply and the chat-auto-booking side effect) were removed here — chat is now wired directly
+// to Supabase Realtime between two real people (see ChatInterface.tsx and
+// supabaseService.getOrCreateChat/getChatMessages/sendChatMessage/subscribeToChatMessages). There's
+// no more artificial "provider" reply since a real provider now types their own responses. The
+// `chats` in-memory object below is kept only because the popularity/trending stats further up
+// still read `chats[p.id].length` as a proxy chat-activity signal — unrelated to this pass.
 
 // Multilingual AI Guide Endpoint
 app.post("/api/ai-guide", async (req, res) => {
@@ -928,44 +822,84 @@ app.post("/api/ai-guide", async (req, res) => {
     let fallbackText = "";
     if (task === "translate") {
       fallbackText = `[Mode Simulation - Clé API non configurée]\nTraduction de votre message en ${targetLang || "langue locale"} :\n"${prompt}" s'exprime couramment dans cette langue pour dire que vous demandez de l'aide pour un travail local à Bertoua.`;
-    } else if (task === "write-description") {
+    } else if (task === "polish") {
       fallbackText = `[Mode Simulation - Clé API non configurée]\nVoici une description professionnelle générée :\n"Je propose mes services professionnels de qualité supérieure à Bertoua. Sérieux, ponctuel et disponible immédiatement pour répondre à vos besoins. Tarif compétitif à convenir."`;
-    } else if (task === "explain-pricing") {
+    } else if (task === "pricing") {
       fallbackText = `[Mode Simulation - Clé API non configurée]\nÀ Bertoua et dans la région de l'Est :\n- Les petits trajets en Moto-Taxi coûtent généralement entre 200 FCFA et 500 FCFA.\n- Les services agricoles se négocient entre 3 000 FCFA et 6 000 FCFA par jour de travail.\n- Les travaux de maçonnerie/bâtiment vont de 5 000 FCFA à 8 000 FCFA par jour selon la complexité.`;
     } else {
-      fallbackText = `Bonjour ! Je suis l'Animateur du village (Conseiller One Village). Je suis là pour vous aider à traduire vos demandes en Gbaya, Makaa ou Fulfulde, ou estimer les tarifs justes à Bertoua. Que désirez-vous savoir aujourd'hui ?`;
+      fallbackText = `Bonjour, je suis Assistant One Village. Je peux traduire vos demandes en Gbaya, Makaa ou Fulfulde, ou vous donner une idée des tarifs justes à Bertoua. Que puis-je faire pour vous ?`;
     }
     return res.json({ text: fallbackText });
   }
 
   try {
-    let systemInstruction = `Tu es le "Conseiller Communautaire de One Village" (Tonton l'Est), un guide d'intelligence artificielle chaleureux, sage et expert de Bertoua et de la région de l'Est du Cameroun.
-Tu parles couramment le français, l'anglais et maîtrises les cultures et langues locales majeures de l'Est : le Gbaya, le Makaa, et le Fulfulde.
-Ton rôle est d'aider les membres de la communauté et les prestataires à mieux communiquer, se comprendre, et convenir de transactions équitables.
-Utilise des expressions polies, respectueuses et chaleureuses propres à la culture camerounaise (ex: "Bonjour mon enfant", "On est ensemble", "Que la paix soit sur toi").`;
+    // Fetched fresh on every request (Item 6: AI guide live grounding) — a category approved
+    // moments ago is reflected in the assistant's answers immediately, with no server restart.
+    // Falls back to the static built-in list if Supabase isn't reachable.
+    const liveCategories = await fetchLiveCategories();
+    // Part 1, Item 3: same live-grounding treatment as categories — a few real open job postings,
+    // fetched fresh every request, so the assistant can point someone looking for work at an
+    // actual opening instead of only ever discussing service categories.
+    // Part A, Item 1: only fetched (and only added to the prompt) when the message actually looks
+    // work/employment-related — was previously fetched and included on every single request
+    // regardless of topic, which meant an extra DB round-trip and ~500-700 extra prompt
+    // characters on every message, even ones with nothing to do with jobs. Also capped at 5 (was 6).
+    const jobSample = isJobRelatedQuery(prompt) ? await fetchOpenJobSample(5) : [];
+    let systemInstruction = `Tu es "Assistant One Village", l'assistant IA de la plateforme One Village à Bertoua (région de l'Est du Cameroun). Tu aides les habitants à trouver des services locaux fiables et les prestataires à mieux présenter leur activité.
 
+RÈGLES DE TON ET DE STYLE (à respecter strictement) :
+- Ton chaleureux, amical et professionnel — comme un assistant local compétent et sympathique. Ce n'est PAS un sage, un prédicateur ou un ancien du village.
+- N'utilise JAMAIS de formules religieuses, de bénédictions, ou d'expressions comme "mon enfant", "que la paix soit sur toi", "que Dieu te bénisse", ou tout terme d'affection excessif.
+- Réponses COURTES par défaut : 2 à 4 phrases maximum pour une question simple. Ne développe une réponse plus longue que si l'utilisateur demande explicitement plus de détails, plus d'options, ou pose une question de suivi.
+- Formatage minimal : évite le gras excessif et les longues listes à puces pour une réponse courte — c'est un chat, pas un document formel.
+- Si la catégorie demandée n'existe pas encore sur la plateforme, dis-le clairement et brièvement, puis propose au maximum UNE catégorie alternative pertinente si cela a vraiment du sens. N'ajoute pas plusieurs suggestions sans rapport juste pour paraître complet.
+
+Tu parles couramment français et anglais, et tu connais les langues locales majeures de l'Est : Gbaya, Makaa, Fulfulde.
+
+Voici les catégories et métiers RÉELLEMENT disponibles sur la plateforme One Village — appuie-toi dessus pour donner des réponses concrètes et précises plutôt que des conseils génériques :
+${buildCategoryContextBlock(liveCategories)}${jobSample.length > 0 ? `
+
+Voici quelques offres d'emploi RÉELLEMENT ouvertes en ce moment sur la plateforme — si quelqu'un cherche du travail ou un emploi dans un métier précis, mentionne une offre pertinente ci-dessous plutôt que de parler uniquement des catégories de services :
+${buildJobContextBlock(jobSample)}` : ""}`;
+
+    // NOTE: task values here must match exactly what the frontend sends (see AIGuide.tsx's
+    // activeTab and AddServiceModal.tsx) — this previously checked for "write-description" and
+    // "explain-pricing", which nothing ever sent, so the "polish" and "pricing" tabs silently fell
+    // through to the generic chat instruction below and never got their specialized prompt.
     if (task === "translate") {
-      systemInstruction += `\nTACHE : Traduis le texte de l'utilisateur de manière fidèle et chaleureuse en langue : ${targetLang}. Donne la traduction claire, puis explique brièvement en une phrase simple comment le prononcer ou le contexte de politesse locale associé. Ne mets aucun code markdown complexe.`;
-    } else if (task === "write-description") {
-      systemInstruction += `\nTACHE : Reçois les notes brutes d'un prestataire de service local qui veut lister son service sur One Village. Rédige pour lui un titre accrocheur, une description professionnelle claire, rassurante et engageante, rédigée à la première personne ("Je..."), mettant en valeur ses compétences et son sérieux. Présente le résultat de manière très soignée et polie.`;
-    } else if (task === "explain-pricing") {
-      systemInstruction += `\nTACHE : L'utilisateur te demande des conseils sur les prix en vigueur à Bertoua pour un type de service. Explique clairement la fourchette de prix moyenne (en Francs CFA - FCFA) observée dans les marchés de Bertoua (Mokolo, Tigaza, Kano, etc.), donne des astuces pour négocier avec respect et équité, et rappelle l'importance de s'entraider dans le village.`;
+      systemInstruction += `\nTACHE : Traduis le texte de l'utilisateur de manière fidèle en langue : ${targetLang}. Donne la traduction claire, puis explique en une phrase simple comment le prononcer ou tout contexte de politesse locale utile. Pas de markdown complexe.`;
+    } else if (task === "polish") {
+      systemInstruction += `\nTACHE : Reçois les notes brutes d'un prestataire de service local qui veut lister son service sur One Village. Rédige un titre accrocheur et une description professionnelle claire et engageante (3-5 phrases maximum), rédigée à la première personne ("Je..."), mettant en valeur ses compétences. Reste concis — ce n'est pas un roman.`;
+    } else if (task === "pricing") {
+      systemInstruction += `\nTACHE : L'utilisateur demande des conseils sur les prix pratiqués à Bertoua pour un type de service. Donne la fourchette de prix moyenne (en FCFA) en 2-4 phrases, avec au besoin un conseil de négociation bref. Pas de longue liste de conseils annexes.`;
     } else {
-      systemInstruction += `\nTACHE : Réponds de manière générale, chaleureuse et informative aux questions sur les services, la vie de quartier à Bertoua, ou l'utilisation de l'application One Village. Garde un ton bienveillant et paternel/maternel.`;
+      systemInstruction += `\nTACHE : Réponds de manière brève et directe aux questions sur les services, la vie de quartier à Bertoua, ou l'utilisation de l'application One Village. Si la question porte sur un besoin précis, indique la catégorie et le métier concernés dans la liste ci-dessus en 2-4 phrases maximum, sans énumérer d'options non demandées.`;
     }
 
-    const response = await ai.models.generateContent({
+    // Part A, Items 2-4: hard 18s timeout + one retry for transient failures (not quota errors).
+    const response = await generateContentWithResilience(ai, {
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         systemInstruction,
         temperature: 0.7,
       },
-    });
+    }, "ai-guide");
 
     res.json({ text: response.text });
   } catch (error: any) {
-    console.error("Gemini API call failed:", error);
+    // Part A, Item 4: always log status/code + message server-side, tagged with which failure mode
+    // (quota/timeout/other) so this is diagnosable from server logs alone, not just a generic
+    // client-side alert.
+    const failureMode = isQuotaError(error) ? "QUOTA/429" : error?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
+    console.error(`[ai-guide] Gemini call failed — ${failureMode}, status: ${error?.status ?? "n/a"}, message: ${error?.message || error}`);
+
+    if (isQuotaError(error)) {
+      return res.status(429).json({ error: "L'assistant reçoit trop de demandes en ce moment. Réessayez dans un instant." });
+    }
+    if (error?.code === "TIMEOUT") {
+      return res.status(504).json({ error: "L'assistant met trop de temps à répondre. Réessayez dans un instant." });
+    }
     res.status(500).json({ error: "L'appel à l'IA a échoué. Veuillez réessayer.", details: error.message });
   }
 });
@@ -1420,47 +1354,25 @@ app.post("/api/admin/providers/bulk-verify", (req, res) => {
 });
 
 // --- Phase 13: Provider Advertising (Facebook-style Promotion) ---
-const promotedAds: PromotedAd[] = [
-  {
-    id: "pad1",
-    providerId: "p2",
-    providerName: "Alhadji Bouba",
-    providerPhone: "+237 699 12 34 56",
-    mediaUrl: "https://images.unsplash.com/photo-1558981806-ec527fa84c39?auto=format&fit=crop&w=600&q=80",
-    mediaType: "image",
-    placement: "home",
-    budgetFCFA: 15000,
-    startDate: "2026-07-01",
-    endDate: "2026-07-15",
-    status: "approved",
-    impressions: 420,
-    clicks: 65,
-    momoTransactionId: "TX_MTN_112233",
-    createdAt: "2026-07-01T08:00:00Z"
-  },
-  {
-    id: "pad2",
-    providerId: "p3",
-    providerName: "Maman Solange",
-    providerPhone: "+237 655 43 21 09",
-    mediaUrl: "https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=600&q=80",
-    mediaType: "image",
-    placement: "TAILORING",
-    budgetFCFA: 10000,
-    startDate: "2026-07-02",
-    endDate: "2026-07-16",
-    status: "approved",
-    impressions: 280,
-    clicks: 34,
-    momoTransactionId: "TX_ORANGE_445566",
-    createdAt: "2026-07-02T09:00:00Z"
-  }
-];
+// This in-memory array is the entire backing store for promoted ads (no Supabase table exists for
+// this feature yet — see POST /api/promoted-ads below, which just unshifts onto this same array).
+// It used to be seeded with two hardcoded demo entries ("pad1"/"pad2", referencing the mock
+// INITIAL_PROVIDERS "Alhadji Bouba"/"Maman Solange" from bertouaData.ts, complete with hardcoded
+// Unsplash stock photo URLs). Root cause of the "Sponsorisé" banner showing an unrelated stock
+// motorcycle photo: PromotedAdsCarousel.tsx only falls back to real-provider rotation when
+// GET /api/promoted-ads returns zero rows — these two permanently-seeded demo rows meant that
+// branch was never reached at all, regardless of any fix to the fallback logic itself. Starting
+// empty lets the carousel's real-provider fallback (with real bannerUrl/avatarUrl prioritized)
+// take over until a genuine paid campaign is submitted through the real flow below.
+const promotedAds: PromotedAd[] = [];
 
 // 1. Get approved ads (optionally filter by placement)
 app.get("/api/promoted-ads", (req, res) => {
   const { placement } = req.query;
-  let filtered = promotedAds.filter(ad => ad.status === "approved");
+  const today = new Date().toISOString().slice(0, 10);
+  // Respect endDate — a promotion that has run out shouldn't keep showing forever just because
+  // nothing else was ever submitted to replace it.
+  let filtered = promotedAds.filter(ad => ad.status === "approved" && ad.endDate >= today);
   if (placement) {
     filtered = filtered.filter(ad => ad.placement === placement || ad.placement === "home");
   }

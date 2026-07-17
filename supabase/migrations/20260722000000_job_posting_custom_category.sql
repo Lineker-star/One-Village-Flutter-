@@ -1,0 +1,18 @@
+-- MIGRATION: Let a job poster describe a custom job category in free text when nothing in the
+-- service_categories dropdown fits, without blocking submission (Item 2 of the 8f-ish "job posting
+-- fixes + admin management + header redesign" step).
+-- Target Platform: PostgreSQL (Supabase / Postgres 15+)
+-- Date: 2026-07-22
+-- Additive only: one new nullable column, no data touched, no existing policy changed.
+--
+-- WHY A PLAIN COLUMN INSTEAD OF REUSING category_suggestions: that table's schema is purpose-built
+-- for SERVICE PROVIDER trade suggestions — provider_id is a FK-shaped reference to a
+-- service_providers row and approval retroactively links the ORIGINAL PROVIDER to the new category
+-- (see reviewCategorySuggestion() in supabase.ts). A job posting's poster is frequently NOT a
+-- registered service provider at all (an individual hiring, or a company account), so there's no
+-- equivalent row to link, and admin-approving a "job category" into service_categories would
+-- conflate two different taxonomies (trades people offer vs. roles employers are hiring for).
+-- A simple free-text column on job_postings is the lower-risk, semantically-correct choice; the
+-- admin "Offres d'Emploi" moderation tab (see AdminDashboard.tsx) surfaces this text directly so an
+-- admin can still see/moderate it without a formal review queue.
+ALTER TABLE public.job_postings ADD COLUMN custom_category TEXT;

@@ -32,6 +32,7 @@ export interface UserProfile {
   id: string;
   role: "client" | "provider" | "admin";
   fullName: string;
+  bio?: string;
   phone?: string;
   whatsappNumber?: string;
   preferredLanguage: "fr" | "en";
@@ -55,7 +56,11 @@ export interface ServiceProvider {
   businessName?: string;
   phone: string;
   whatsappNumber?: string;
-  category: ServiceCategory;
+  // A plain string, not strictly ServiceCategory: real providers can belong to an admin-approved
+  // category that only exists in the database (e.g. an approved "Autre" suggestion), which has no
+  // corresponding enum member. Look up CATEGORY_DETAILS[category as ServiceCategory] and fall back
+  // gracefully (via ?.) when it's a DB-only category with no curated icon/color.
+  category: string;
   neighborhoodId: string;
   rateFCFA: number;
   rateUnit: string; // e.g., "heure", "jour", "tâche"
@@ -69,13 +74,15 @@ export interface ServiceProvider {
   verified: boolean;
   available: boolean;
   bookingsCount?: number;
-  categories?: ServiceCategory[];
+  categories?: string[];
   status?: "pending" | "approved" | "rejected";
   idNumber?: string;
   idCardFrontUrl?: string;
   idCardBackUrl?: string;
   created_by_admin?: boolean;
   rejectionReason?: string;
+  cvUrl?: string;
+  pendingCategoryName?: string;
   recencyScore?: number;
   popularityScore?: number;
   popularityViewsToday?: number;
@@ -87,6 +94,9 @@ export interface ServiceProvider {
   popularityChatsToday?: number;
   popularityChatsWeek?: number;
   popularityChatsMonth?: number;
+  createdAt?: string; // ISO timestamp — real providers only (public_provider_cards.created_at)
+  subcategories?: string[]; // provider_services.subcategory values, for full-text search matching
+  customDescriptions?: string[]; // provider_services.custom_description values ("Autre" free text)
 }
 
 export interface Review {
@@ -118,6 +128,35 @@ export interface Booking {
   paymentPhone?: string;
   momoTransactionId?: string;
   createdAt: string;
+}
+
+// Real Supabase-backed booking (see supabase/migrations/20260709000000_init_schema.sql and
+// 20260715010000_bookings_realtime_and_status_rules.sql). Distinct from the legacy Booking/
+// BookingStatus/PaymentMethod types above, which still back the mock in-memory bookings used by
+// chat auto-booking, the admin dispute panel, and provider popularity stats — none of those moved
+// to Supabase yet.
+export type RealBookingStatus = "requested" | "accepted" | "in_progress" | "completed" | "cancelled";
+export type RealPaymentMethod = "mobile_money" | "cash";
+
+export interface RealBooking {
+  id: string;
+  clientId: string;
+  providerId: string;
+  categoryId?: number | null;
+  status: RealBookingStatus;
+  paymentMethod: RealPaymentMethod;
+  agreedPrice: number;
+  scheduledAt: string; // ISO timestamp
+  description?: string;
+  clientConfirmedComplete: boolean;
+  providerConfirmedComplete: boolean;
+  createdAt: string;
+  // Denormalized display fields resolved via join in supabase.ts — never written back.
+  clientName?: string;
+  clientPhone?: string;
+  providerBusinessName?: string;
+  categoryNameFR?: string;
+  categoryNameEN?: string;
 }
 
 export interface CommunityAd {

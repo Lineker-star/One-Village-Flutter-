@@ -52,8 +52,8 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
 
   const t = {
     fr: {
-      title: "Conseiller One Village AI",
-      subtitle: "Tonton l'Est — Sagesse, Traduction & Tarifs de l'Est du Cameroun",
+      title: "Assistant One Village",
+      subtitle: "Trouvez un service, traduisez une demande ou estimez un tarif à Bertoua",
       chatPlaceholder: "Posez-moi une question sur Bertoua, les langues locales ou One Village...",
       translatePlaceholder: "Entrez votre phrase en français ou anglais...",
       polishPlaceholder: "Décrivez votre service brièvement (ex: je lave le manioc, rapide, Mokolo, 3000f)...",
@@ -69,7 +69,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
         pricing: "Tarifs de l'Est",
         video: "Guide Vidéo"
       },
-      thinking: "Sagesse en cours de réflexion...",
+      thinking: "L'assistant réfléchit...",
       audioPrompt: "Écouter la prononciation locale (Phonétique)",
       unsupportedAudio: "Audio bientôt disponible pour ce dialecte spécifique !",
       offlinePhrasesTitle: "Phrases courantes de Bertoua (Traduction Instantanée)",
@@ -83,8 +83,8 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
       stopSpeech: "Arrêter la lecture"
     },
     en: {
-      title: "One Village AI Guide",
-      subtitle: "Tonton l'Est — Wisdom, Translation & Pricing for Eastern Cameroon",
+      title: "One Village Assistant",
+      subtitle: "Find a service, translate a request, or estimate a fair price in Bertoua",
       chatPlaceholder: "Ask me a question about Bertoua, local languages or One Village...",
       translatePlaceholder: "Enter your sentence in English or French...",
       polishPlaceholder: "Describe your service briefly (e.g. I clear fields, fast work, Mokolo, 5000f)...",
@@ -100,7 +100,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
         pricing: "East Region Prices",
         video: "Video Guide"
       },
-      thinking: "Tonton l'Est is reflecting...",
+      thinking: "The assistant is thinking...",
       audioPrompt: "Listen to local pronunciation (Phonetic)",
       unsupportedAudio: "Audio coming soon for this specific dialect!",
       offlinePhrasesTitle: "Common Bertoua Phrases (Instant Match)",
@@ -246,7 +246,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
   };
 
   return (
-    <div id="ai-guide-widget" className="bg-amber-50/70 border border-amber-200/60 rounded-2xl p-6 shadow-sm overflow-hidden backdrop-blur-sm">
+    <div id="ai-guide-widget" className="bg-white/55 border border-[#E3A23D]/25 rounded-2xl p-6 shadow-xl overflow-hidden backdrop-blur-md">
       <div className="flex items-start justify-between gap-4 mb-5">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 rounded-full bg-amber-600 overflow-hidden shrink-0 shadow-sm border border-amber-500">
@@ -290,13 +290,13 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
                 setInputText("");
                 setResponse(null);
               }}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              className={`flex-initial sm:flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-all duration-150 hover:scale-[1.03] active:scale-[0.97] cursor-pointer ${
                 activeTab === tab
-                  ? "bg-amber-800 text-white shadow-sm"
+                  ? "bg-[#E3A23D] text-[#241611] shadow-sm"
                   : "text-amber-800 hover:bg-amber-200/40"
               }`}
             >
-              <Icon className="w-3.5 h-3.5" />
+              <Icon className="w-3.5 h-3.5 shrink-0" />
               <span>{t.tabs[tab]}</span>
             </button>
           );
@@ -335,7 +335,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
                   <Globe className="w-3.5 h-3.5 text-amber-700" />
                   Langue :
                 </span>
-                <div className="flex gap-1">
+                <div className="flex flex-wrap gap-1">
                   {["Gbaya", "Makaa", "Fulfulde", "Français", "English"].map((langName) => (
                     <button
                       type="button"
@@ -418,7 +418,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
                   type="submit"
                   disabled={loading || !inputText.trim()}
                   id="btn-ai-submit"
-                  className="p-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg disabled:opacity-45 disabled:hover:bg-amber-800 transition-colors cursor-pointer"
+                  className="p-2 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] rounded-lg disabled:opacity-45 transition-all duration-150 hover:scale-105 active:scale-95 cursor-pointer"
                 >
                   {loading ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -495,7 +495,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
                         onApplyPolishedDescription(cleanText);
                       }
                     }}
-                    className="bg-amber-800 hover:bg-amber-900 text-white flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shadow-sm"
+                    className="bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 hover:scale-105 active:scale-95 shadow-sm"
                   >
                     <FileText className="w-3.5 h-3.5" />
                     {t.applyBtn}

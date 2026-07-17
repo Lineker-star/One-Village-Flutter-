@@ -6,6 +6,8 @@
 import React, { useState, useEffect } from "react";
 import { ServiceProvider, ServiceCategory } from "../types.ts";
 import { CATEGORY_DETAILS, BERTOUA_NEIGHBORHOODS } from "../data/bertouaData.ts";
+import { supabaseService } from "../lib/supabase.ts";
+import { toTitleCase } from "../lib/textFormat.ts";
 import { 
   Star, 
   MapPin, 
@@ -38,18 +40,40 @@ interface ProviderProfileProps {
   isProviderSimulated?: boolean;
 }
 
-export default function ProviderProfile({ 
-  provider, 
-  lang, 
-  onBack, 
-  onBook, 
+export default function ProviderProfile({
+  provider: initialProvider,
+  lang,
+  onBack,
+  onBook,
   onChat,
   isLoggedIn = false,
   currentUser = null,
   isProviderSimulated = false
 }: ProviderProfileProps) {
+  // Fetches the real record from Supabase (respecting RLS: authenticated users get full details on
+  // approved providers, anonymous users get the public_provider_cards-restricted view — see
+  // supabaseService.getProviderFullRecord) and replaces the initial prop once it resolves. `provider`
+  // is shadowed here so the rest of this component (which references `provider.*` throughout)
+  // automatically uses the freshest data without needing any other changes.
+  const [provider, setProvider] = useState<ServiceProvider>(initialProvider);
+
+  useEffect(() => {
+    setProvider(initialProvider);
+    let active = true;
+    supabaseService
+      .getProviderFullRecord(initialProvider.id)
+      .then((full) => {
+        if (active && full) setProvider(full);
+      })
+      .catch((err) => console.error("Failed to load full provider record:", err));
+    return () => {
+      active = false;
+    };
+  }, [initialProvider.id]);
+
   const cat = CATEGORY_DETAILS[provider.category];
   const neighborhood = BERTOUA_NEIGHBORHOODS.find((n) => n.id === provider.neighborhoodId);
+  const neighborhoodDisplay = neighborhood ? neighborhood.name : toTitleCase(provider.neighborhoodId);
   const [showFullPhone, setShowFullPhone] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -76,7 +100,7 @@ Je vous contacte depuis la plateforme One Village concernant vos services de ${c
 Voici les détails de ma demande de réservation par WhatsApp :
 - Date souhaitée : ${waDate}
 - Heure souhaitée : ${waTime}
-- Quartier d'intervention : ${neighborhood ? neighborhood.name : provider.neighborhoodId}, Bertoua
+- Quartier d'intervention : ${neighborhoodDisplay}, Bertoua
 - Description précise du besoin : ${waDescription}
 
 Merci de me confirmer votre disponibilité et votre tarif !`
@@ -87,7 +111,7 @@ I am contacting you from the One Village platform regarding your ${cat?.nameEN |
 Here are the details of my WhatsApp booking request:
 - Desired Date: ${waDate}
 - Desired Time: ${waTime}
-- Intervention Neighborhood: ${neighborhood ? neighborhood.name : provider.neighborhoodId}, Bertoua
+- Intervention Neighborhood: ${neighborhoodDisplay}, Bertoua
 - Precise description of need: ${waDescription}
 
 Thank you for confirming your availability and rate!`;
@@ -95,24 +119,21 @@ Thank you for confirming your availability and rate!`;
     const cleanPhone = (provider.whatsappNumber || provider.phone).replace(/[\s+]/g, "");
     const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(fullMessage)}`;
 
-    // Log booking in system for transparency and dispute management
+    // Log a real booking row for transparency and dispute management (same Supabase-backed flow
+    // as BookingModal — see supabaseService.createBooking). Fire-and-forget: a failure here (e.g.
+    // the provider isn't actually approved yet) shouldn't block opening WhatsApp.
     if (isLoggedIn && currentUser) {
-      fetch("/api/bookings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      supabaseService
+        .createBooking({
+          clientId: currentUser.id,
           providerId: provider.id,
-          providerName: provider.name,
-          customerName: currentUser.fullName || "Visiteur de Bertoua",
-          customerPhone: currentUser.phone || "+237 600 00 00 00",
-          category: provider.category,
-          serviceDate: waDate,
-          serviceTime: waTime,
-          description: `[WhatsApp Booking Request] ${waDescription}`,
-          estimatedFCFA: provider.rateFCFA || 5000,
-          paymentMethod: "CASH",
+          categorySlug: provider.category,
+          paymentMethod: "cash",
+          agreedPrice: provider.rateFCFA || 0,
+          scheduledAt: new Date(`${waDate}T${waTime || "09:00"}`).toISOString(),
+          description: `[Demande via WhatsApp] ${waDescription}`,
         })
-      }).catch(err => console.error("Error logging WhatsApp booking to server:", err));
+        .catch((err) => console.error("Error logging WhatsApp booking to Supabase:", err));
     }
 
     window.open(url, "_blank");
@@ -125,14 +146,14 @@ Thank you for confirming your availability and rate!`;
   const [submittingResponseMap, setSubmittingResponseMap] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    // Log profile view analytics on backend
+    // Log profile view analytics on backend (still mock/legacy, unrelated to ratings)
     fetch(`/api/providers/${provider.id}/view`, { method: "POST" })
       .catch(err => console.error("Error logging profile view", err));
 
     if (isLoggedIn) {
       setLoadingReviews(true);
-      fetch(`/api/providers/${provider.id}/reviews`)
-        .then((res) => res.json())
+      supabaseService
+        .getProviderRatings(provider.id)
         .then((data) => {
           setReviewsList(data);
           setLoadingReviews(false);
@@ -150,22 +171,12 @@ Thank you for confirming your availability and rate!`;
 
     setSubmittingResponseMap(prev => ({ ...prev, [reviewId]: true }));
     try {
-      const res = await fetch(`/api/reviews/${reviewId}/response`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ responseText: text }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setReviewsList(prev => prev.map(r => r.id === reviewId ? data.review : r));
-        setResponseTextMap(prev => ({ ...prev, [reviewId]: "" }));
-      } else {
-        const errData = await res.json();
-        alert(errData.error || "Failed to submit response");
-      }
-    } catch (err) {
+      await supabaseService.respondToRating(reviewId, text.trim());
+      setReviewsList(prev => prev.map(r => r.id === reviewId ? { ...r, response: text.trim() } : r));
+      setResponseTextMap(prev => ({ ...prev, [reviewId]: "" }));
+    } catch (err: any) {
       console.error(err);
-      alert("Error submitting response");
+      alert(err.message || "Error submitting response");
     } finally {
       setSubmittingResponseMap(prev => ({ ...prev, [reviewId]: false }));
     }
@@ -350,16 +361,7 @@ Thank you for confirming your availability and rate!`;
 
   const starRows = [5, 4, 3, 2, 1].map(star => {
     if (!isLoggedIn || loadingReviews || reviewsList.length === 0) {
-      // Fallback percentages for professional seeding appearance
-      const mockCounts: Record<string, Record<number, { pct: string, count: number }>> = {
-        p1: { 5: { pct: "75%", count: 18 }, 4: { pct: "18%", count: 4 }, 3: { pct: "7%", count: 2 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } },
-        p2: { 5: { pct: "85%", count: 44 }, 4: { pct: "12%", count: 6 }, 3: { pct: "3%", count: 2 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } },
-        p3: { 5: { pct: "70%", count: 26 }, 4: { pct: "20%", count: 8 }, 3: { pct: "10%", count: 3 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } },
-        p4: { 5: { pct: "60%", count: 11 }, 4: { pct: "30%", count: 5 }, 3: { pct: "10%", count: 2 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } },
-        p5: { 5: { pct: "90%", count: 13 }, 4: { pct: "10%", count: 2 }, 3: { pct: "0%", count: 0 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } }
-      };
-      const pData = mockCounts[provider.id] || { 5: { pct: "80%", count: 4 }, 4: { pct: "20%", count: 1 }, 3: { pct: "0%", count: 0 }, 2: { pct: "0%", count: 0 }, 1: { pct: "0%", count: 0 } };
-      return { star, ...pData[star] };
+      return { star, pct: "0%", count: 0 };
     }
     const count = reviewsList.filter(r => Math.round(r.rating) === star).length;
     const total = reviewsList.length;
@@ -432,13 +434,17 @@ Thank you for confirming your availability and rate!`;
               </span>
               <div className="flex items-center gap-1">
                 <MapPin className="w-4 h-4 text-amber-700 sm:text-amber-300" />
-                <span>{neighborhood ? neighborhood.name : provider.neighborhoodId}, Bertoua</span>
+                <span>{neighborhoodDisplay}, Bertoua</span>
               </div>
-              <div className="flex items-center gap-1 font-bold">
+              <a
+                href="#reviews-section"
+                className="flex items-center gap-1 font-bold hover:underline cursor-pointer"
+                title={lang === "fr" ? "Voir les avis" : "See reviews"}
+              >
                 <Star className="w-4 h-4 fill-amber-500 text-amber-500 sm:fill-amber-400 sm:text-amber-400" />
                 <span>{provider.rating.toFixed(1)}</span>
                 <span className="text-[10px] font-normal opacity-80">({provider.reviewCount} {t.reviewsCount})</span>
-              </div>
+              </a>
             </div>
           </div>
 
@@ -455,6 +461,26 @@ Thank you for confirming your availability and rate!`;
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Prominent quick-actions bar (mobile/tablet only — on lg+ the sidebar card below is already
+          visible alongside the content without scrolling). Ensures Chat/Book are never buried below
+          the About/Services/Gallery/Ratings cards on a phone screen. */}
+      <div className="lg:hidden flex gap-2.5">
+        <button
+          onClick={onChat}
+          className="flex-1 bg-white border-2 border-amber-800 text-amber-950 font-bold text-xs py-3.5 rounded-xl flex items-center justify-center gap-2 hover:bg-amber-50 transition-colors shadow-sm cursor-pointer"
+        >
+          <MessageSquare className="w-4 h-4" />
+          {t.chatBtn}
+        </button>
+        <button
+          onClick={onBook}
+          className="flex-1 bg-amber-900 hover:bg-amber-950 text-white font-extrabold text-xs py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all shadow-sm cursor-pointer"
+        >
+          <Calendar className="w-4 h-4" />
+          {t.bookBtn}
+        </button>
       </div>
 
       {/* Main Grid Content */}
@@ -503,6 +529,20 @@ Thank you for confirming your availability and rate!`;
                 </div>
               </div>
             </div>
+
+            {isOwnProfile && provider.status === "rejected" && (
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 space-y-1">
+                <h4 className="font-bold text-red-800 text-xs uppercase tracking-wider">
+                  {lang === "fr" ? "Profil rejeté" : "Profile rejected"}
+                </h4>
+                <p className="text-xs text-red-800/90 font-serif">
+                  {provider.rejectionReason ||
+                    (lang === "fr"
+                      ? "Aucun motif fourni. Contactez l'administration pour plus de détails."
+                      : "No reason provided. Contact the administration for details.")}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Offred Services checklist (Aesthetics) */}
@@ -547,7 +587,7 @@ Thank you for confirming your availability and rate!`;
           </div>
 
           {/* Ratings & Breakdown */}
-          <div className="bg-white border border-amber-100 rounded-3xl p-6 sm:p-8 shadow-sm space-y-6">
+          <div id="reviews-section" className="bg-white border border-amber-100 rounded-3xl p-6 sm:p-8 shadow-sm space-y-6 scroll-mt-24">
             <div className="flex justify-between items-center border-b border-amber-50 pb-3">
               <h3 className="font-black text-amber-950 text-sm uppercase tracking-wider flex items-center gap-2">
                 <Star className="w-4 h-4 text-amber-700 fill-amber-100" />
@@ -750,20 +790,20 @@ Thank you for confirming your availability and rate!`;
                 {t.whatsappBtn}
               </button>
 
-              <button 
+              <button
                 onClick={onChat}
                 className="w-full bg-white border border-amber-200 text-amber-950 font-bold text-xs py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-amber-50 transition-colors shadow-xs cursor-pointer"
               >
                 <MessageSquare className="w-4 h-4 text-amber-700" />
-                {t.chatBtn} (In-App)
+                {t.chatBtn}
               </button>
 
-              <button 
+              <button
                 onClick={onBook}
                 className="w-full bg-amber-900 hover:bg-amber-950 text-white font-extrabold text-xs py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all shadow-sm cursor-pointer"
               >
                 <Calendar className="w-4 h-4" />
-                {t.bookBtn} (Phase 7)
+                {t.bookBtn}
               </button>
             </div>
           </div>
@@ -773,7 +813,7 @@ Thank you for confirming your availability and rate!`;
             <div>
               <h3 className="font-black text-amber-950 text-xs uppercase tracking-wider flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-amber-700" />
-                {t.locationTitle} : {neighborhood ? neighborhood.name : provider.neighborhoodId}
+                {t.locationTitle} : {neighborhoodDisplay}
               </h3>
               <p className="text-[11px] text-amber-800 mt-1 leading-normal font-serif">
                 {neighborhood ? neighborhood.description : "Quartier accueillant et solidaire de Bertoua."}
@@ -783,7 +823,7 @@ Thank you for confirming your availability and rate!`;
             {/* Custom Interactive Map Representation */}
             <div 
               className="relative w-full h-48 bg-[#FAF8F5] border border-amber-200/75 rounded-2xl overflow-hidden shadow-inner group cursor-pointer"
-              onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=Bertoua+${neighborhood ? neighborhood.name : provider.neighborhoodId}`, "_blank")}
+              onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=Bertoua+${neighborhoodDisplay}`, "_blank")}
             >
               {/* Abstract layout lines imitating streets and sectors */}
               <div className="absolute inset-0 bg-[radial-gradient(#d97706_1px,transparent_1px)] [background-size:16px_16px] opacity-20" />
@@ -804,7 +844,7 @@ Thank you for confirming your availability and rate!`;
                   📍
                 </span>
                 <span className="mt-1 bg-amber-950/90 text-white text-[9px] font-bold px-2 py-0.5 rounded shadow-sm border border-amber-800">
-                  {neighborhood ? neighborhood.name : provider.neighborhoodId}
+                  {neighborhoodDisplay}
                 </span>
               </div>
 
@@ -816,7 +856,7 @@ Thank you for confirming your availability and rate!`;
             </div>
 
             <button
-              onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=Bertoua+${neighborhood ? neighborhood.name : provider.neighborhoodId}`, "_blank")}
+              onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=Bertoua+${neighborhoodDisplay}`, "_blank")}
               className="w-full py-2 bg-amber-50 hover:bg-amber-100/70 border border-amber-200/50 text-amber-950 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5" />
@@ -828,8 +868,8 @@ Thank you for confirming your availability and rate!`;
 
       {/* CUSTOM INTERACTIVE WHATSAPP BOOKING TEMPLATE BUILDER MODAL */}
       {showWhatsAppModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[9999] animate-fade-in">
-          <div className="bg-white rounded-3xl border border-amber-100 shadow-2xl max-w-md w-full p-6 sm:p-8 space-y-6 relative">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] animate-fade-in overflow-y-auto p-4">
+          <div className="bg-white rounded-3xl border border-amber-100 shadow-2xl max-w-md w-full p-6 sm:p-8 space-y-6 relative mx-auto my-6 sm:my-10">
             
             {/* Header */}
             <div className="flex justify-between items-center border-b border-amber-50 pb-3">
@@ -854,7 +894,7 @@ Thank you for confirming your availability and rate!`;
 
             {/* Inputs Body */}
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="text-[9px] font-black text-amber-950 uppercase tracking-wide block">
                     {lang === "fr" ? "Date souhaitée" : "Desired Date"}
@@ -899,8 +939,8 @@ Thank you for confirming your availability and rate!`;
                 </span>
                 <p className="text-[10px] text-amber-950/90 leading-relaxed font-mono whitespace-pre-line bg-white p-2.5 rounded-xl border border-emerald-200/30 max-h-36 overflow-y-auto">
                   {lang === "fr"
-                    ? `Bonjour ${provider.name},\nJe vous contacte depuis One Village...\n- Date souhaitée : ${waDate}\n- Heure souhaitée : ${waTime}\n- Quartier : ${neighborhood ? neighborhood.name : provider.neighborhoodId}\n- Description : ${waDescription}`
-                    : `Hello ${provider.name},\nI am contacting you from One Village...\n- Date: ${waDate}\n- Time: ${waTime}\n- Neighborhood: ${neighborhood ? neighborhood.name : provider.neighborhoodId}\n- Description: ${waDescription}`}
+                    ? `Bonjour ${provider.name},\nJe vous contacte depuis One Village...\n- Date souhaitée : ${waDate}\n- Heure souhaitée : ${waTime}\n- Quartier : ${neighborhoodDisplay}\n- Description : ${waDescription}`
+                    : `Hello ${provider.name},\nI am contacting you from One Village...\n- Date: ${waDate}\n- Time: ${waTime}\n- Neighborhood: ${neighborhoodDisplay}\n- Description: ${waDescription}`}
                 </p>
               </div>
             </div>

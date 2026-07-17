@@ -1,10 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import jsPDF from "jspdf";
 import { ServiceCategory } from "../types.ts";
-import { BERTOUA_NEIGHBORHOODS } from "../data/bertouaData.ts";
-import { supabaseService } from "../lib/supabase.ts";
+import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "../data/bertouaData.ts";
+import { supabaseService, mockSupabase } from "../lib/supabase.ts";
+import { toTitleCase } from "../lib/textFormat.ts";
+import BertouaMap from "./BertouaMap.tsx";
+import brandLogo from "../assets/images/one_village_logo_1784027088635.jpg";
 import {
   Sparkles,
-  MapPin,
   Phone,
   Check,
   Languages,
@@ -21,7 +24,11 @@ import {
   Globe,
   Loader2,
   Lock,
+  Download,
 } from "lucide-react";
+
+const IMAGE_ACCEPT = "image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif,.heic,.heif";
+const OTHER_NEIGHBORHOOD_VALUE = "OTHER_NEIGHBORHOOD";
 
 interface ProviderWizardProps {
   lang: "fr" | "en";
@@ -51,13 +58,22 @@ export default function ProviderWizard({
   const [translating, setTranslating] = useState(false);
 
   // Category State
-  const [mainCategory, setMainCategory] = useState<ServiceCategory>(ServiceCategory.AGRICULTURE);
+  // A plain string, not ServiceCategory: mainCategory holds a service_categories.slug, which may be
+  // one of the 8 built-in enum values OR a DB-only category from a previously-approved "Autre"
+  // suggestion (see allCategories below — the live source of truth for this dropdown).
+  const [mainCategory, setMainCategory] = useState<string>(ServiceCategory.AGRICULTURE);
+  const [allCategories, setAllCategories] = useState<Array<{ id: number; slug: string; nameFr: string; nameEn: string }>>([]);
+  const [isOtherCategory, setIsOtherCategory] = useState(false);
+  const [otherCategoryName, setOtherCategoryName] = useState("");
+  const [otherCategoryDescription, setOtherCategoryDescription] = useState("");
   const [selectedSubCategories, setSelectedSubCategories] = useState<string[]>([]);
   const [otherCategorySpec, setOtherCategorySpec] = useState("");
   const [transportSubtype, setTransportSubtype] = useState<"truck" | "tricycle" | "bike" | "car" | "">("");
 
   // Location State
   const [neighborhoodId, setNeighborhoodId] = useState("mokolo");
+  const [useFreeTextNeighborhood, setUseFreeTextNeighborhood] = useState(false);
+  const [neighborhoodFreeText, setNeighborhoodFreeText] = useState("");
   const [textAddress, setTextAddress] = useState("");
   const [city, setCity] = useState("Bertoua");
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number }>({ lat: 4.5772, lng: 13.6826 });
@@ -73,6 +89,9 @@ export default function ProviderWizard({
   const [displayPricing, setDisplayPricing] = useState(true);
   const [rateFCFA, setRateFCFA] = useState("");
   const [rateUnit, setRateUnit] = useState("jour");
+
+  // Languages spoken
+  const [languages, setLanguages] = useState<string[]>(["FR"]);
 
   // Media State
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
@@ -90,6 +109,34 @@ export default function ProviderWizard({
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+
+  // Item 1 fix: this wizard has no native <form>/`required` at all — each step already does its
+  // own manual validation via handleNext below — but when the admin-assisted setup renders it
+  // inside App.tsx's `fixed inset-0 overflow-y-auto` modal, the errorMsg banner (which sits above
+  // each step's fields) can end up scrolled out of view if the user was scrolled further down a
+  // long step, making the failure look like nothing happened. errorBannerRef lets every validation
+  // failure below scroll that banner back into view, and the couple of vestigial `required` HTML
+  // attributes previously left on some fields (inert without a real <form>) have been removed.
+  const errorBannerRef = useRef<HTMLDivElement>(null);
+  const descriptionFRRef = useRef<HTMLTextAreaElement>(null);
+  const textAddressRef = useRef<HTMLInputElement>(null);
+  const contactPhoneRef = useRef<HTMLInputElement>(null);
+  const whatsappNumberRef = useRef<HTMLInputElement>(null);
+  const idNumberRef = useRef<HTMLInputElement>(null);
+
+  const showStepError = (message: string, fieldRef?: React.RefObject<HTMLElement>) => {
+    setErrorMsg(message);
+    const target = fieldRef?.current ?? errorBannerRef.current;
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    (fieldRef?.current as HTMLInputElement | HTMLTextAreaElement | undefined)?.focus?.({ preventScroll: true });
+  };
+
+  // Live list of every category that actually exists in service_categories (built-in + any
+  // admin-approved "Autre" suggestions) — the single source of truth for this dropdown, so a
+  // newly-approved category shows up here without a rebuild.
+  useEffect(() => {
+    supabaseService.getAllServiceCategories().then(setAllCategories);
+  }, []);
 
   // Translation Helper via Gemini API
   const handleTranslateDescription = async () => {
@@ -119,12 +166,22 @@ export default function ProviderWizard({
     }
   };
 
-  // Helper to handle client-side compressed image uploads
-  const handleFileUpload = async (file: File, bucket: string, setUrl: (url: string) => void) => {
+  // Helper to handle client-side compressed image uploads to the real Supabase Storage buckets.
+  // Admin-assisted setup uses a synthetic userId with no real Supabase auth user behind it (see
+  // handleSubmitRegistration), so its uploads stay on the local mock path — storage RLS requires
+  // auth.uid() to match the upload folder, which a synthetic id can never satisfy.
+  const handleFileUpload = async (
+    file: File,
+    bucket: "provider-media" | "id-verification",
+    filename: string,
+    setUrl: (url: string) => void
+  ) => {
     try {
-      const publicUrl = await supabaseService.uploadFile(bucket, file);
-      setUrl(publicUrl);
-      return publicUrl;
+      const url = isAdminCreating
+        ? await mockSupabase.compressAndUpload(file, bucket)
+        : await supabaseService.uploadProviderMedia(bucket, userId, file, filename);
+      setUrl(url);
+      return url;
     } catch (err) {
       console.error(`Upload error on bucket ${bucket}:`, err);
       return "";
@@ -139,35 +196,43 @@ export default function ProviderWizard({
     setErrorMsg("");
     if (step === 1) {
       if (!descriptionFR.trim()) {
-        setErrorMsg(lang === "fr" ? "Veuillez fournir une description en français." : "Please provide a description in French.");
+        showStepError(lang === "fr" ? "Veuillez fournir une description en français." : "Please provide a description in French.", descriptionFRRef);
+        return;
+      }
+      if (isOtherCategory && !otherCategoryName.trim()) {
+        showStepError(lang === "fr" ? "Veuillez nommer la nouvelle catégorie proposée." : "Please name the new category you're suggesting.");
         return;
       }
       setStep(2);
     } else if (step === 2) {
-      if (selectedSubCategories.length === 0 && !otherCategorySpec.trim()) {
-        setErrorMsg(lang === "fr" ? "Veuillez choisir au moins une catégorie de service." : "Please select at least one service category.");
+      if (!isOtherCategory && selectedSubCategories.length === 0 && !otherCategorySpec.trim()) {
+        showStepError(lang === "fr" ? "Veuillez choisir au moins une catégorie de service." : "Please select at least one service category.");
         return;
       }
       setStep(3);
     } else if (step === 3) {
+      if (useFreeTextNeighborhood && !neighborhoodFreeText.trim()) {
+        showStepError(lang === "fr" ? "Veuillez indiquer le nom de votre quartier." : "Please enter your neighborhood name.");
+        return;
+      }
       if (!textAddress.trim()) {
-        setErrorMsg(lang === "fr" ? "Veuillez indiquer votre adresse textuelle." : "Please specify your physical address.");
+        showStepError(lang === "fr" ? "Veuillez indiquer votre adresse textuelle." : "Please specify your physical address.", textAddressRef);
         return;
       }
       setStep(4);
     } else if (step === 4) {
       if (!validatePhone(contactPhone)) {
-        setErrorMsg(lang === "fr" ? "Format de téléphone incorrect. Doit commencer par +237." : "Incorrect phone format. Must start with +237.");
+        showStepError(lang === "fr" ? "Format de téléphone incorrect. Doit commencer par +237." : "Incorrect phone format. Must start with +237.", contactPhoneRef);
         return;
       }
       if (!validatePhone(whatsappNumber)) {
-        setErrorMsg(lang === "fr" ? "Format WhatsApp incorrect. Doit commencer par +237." : "Incorrect WhatsApp format. Must start with +237.");
+        showStepError(lang === "fr" ? "Format WhatsApp incorrect. Doit commencer par +237." : "Incorrect WhatsApp format. Must start with +237.", whatsappNumberRef);
         return;
       }
       setStep(5);
     } else if (step === 5) {
       if (displayPricing && (!rateFCFA || Number(rateFCFA) <= 0)) {
-        setErrorMsg(lang === "fr" ? "Veuillez entrer un tarif valide en FCFA." : "Please enter a valid rate in FCFA.");
+        showStepError(lang === "fr" ? "Veuillez entrer un tarif valide en FCFA." : "Please enter a valid rate in FCFA.");
         return;
       }
       setStep(6);
@@ -176,10 +241,10 @@ export default function ProviderWizard({
       setUploadingMedia(true);
       try {
         if (avatarFile && !avatarUrl) {
-          await handleFileUpload(avatarFile, "avatars", setAvatarUrl);
+          await handleFileUpload(avatarFile, "provider-media", "avatar.jpg", setAvatarUrl);
         }
         if (bannerFile && !bannerUrl) {
-          await handleFileUpload(bannerFile, "banners", setBannerUrl);
+          await handleFileUpload(bannerFile, "provider-media", "banner.jpg", setBannerUrl);
         }
       } catch (e) {
         console.error("Media pre-upload failed", e);
@@ -189,21 +254,21 @@ export default function ProviderWizard({
       setStep(7);
     } else if (step === 7) {
       if (!idNumber.trim()) {
-        setErrorMsg(lang === "fr" ? "Veuillez saisir votre numéro de carte d'identité." : "Please enter your National ID card number.");
+        showStepError(lang === "fr" ? "Veuillez saisir votre numéro de carte d'identité." : "Please enter your National ID card number.", idNumberRef);
         return;
       }
       if (!idFrontFile && !idFrontUrl) {
-        setErrorMsg(lang === "fr" ? "La photo de face de la CNI est requise." : "Front photo of ID card is required.");
+        showStepError(lang === "fr" ? "La photo de face de la CNI est requise." : "Front photo of ID card is required.");
         return;
       }
       // Upload ID files
       setUploadingMedia(true);
       try {
         if (idFrontFile && !idFrontUrl) {
-          await handleFileUpload(idFrontFile, "id-private", setIdFrontUrl);
+          await handleFileUpload(idFrontFile, "id-verification", "id-front.jpg", setIdFrontUrl);
         }
         if (idBackFile && !idBackUrl) {
-          await handleFileUpload(idBackFile, "id-private", setIdBackUrl);
+          await handleFileUpload(idBackFile, "id-verification", "id-back.jpg", setIdBackUrl);
         }
       } catch (e) {
         console.error("ID upload failed", e);
@@ -223,100 +288,94 @@ export default function ProviderWizard({
     setSubmitting(true);
     setErrorMsg("");
     try {
-      const categoriesList = [...selectedSubCategories];
-      if (otherCategorySpec.trim()) {
-        categoriesList.push(`OTHER:${otherCategorySpec.trim()}`);
-      }
+      // Structured sub-type values (e.g. Transport's truck/tricycle/bike/car, or the tech_* repair
+      // specialties) go into provider_services.subcategory; only the free-text "other, please
+      // specify" note goes into custom_description.
+      const subcategory =
+        mainCategory === ServiceCategory.TRANSPORT && transportSubtype
+          ? transportSubtype
+          : selectedSubCategories.join(", ") || undefined;
+      const customDescription = otherCategorySpec.trim() || undefined;
+      const effectiveNeighborhoodId = useFreeTextNeighborhood ? toTitleCase(neighborhoodFreeText) : neighborhoodId;
 
-      const payload = {
-        id: userId,
-        name: fullName || businessName,
-        businessName: businessName || fullName,
-        phone: contactPhone,
-        whatsappNumber: whatsappNumber,
-        email: email,
-        category: mainCategory,
-        categories: categoriesList,
-        otherCategory: otherCategorySpec.trim(),
-        transportSubtype: transportSubtype,
-        neighborhoodId: neighborhoodId,
-        city: city,
-        textAddress: textAddress,
-        gpsCoords: gpsCoords,
-        rateFCFA: displayPricing ? Number(rateFCFA) : 0,
-        rateUnit: rateUnit,
-        displayPricing: displayPricing,
-        description: descriptionFR,
-        descriptionFR: descriptionFR,
-        descriptionEN: descriptionEN || descriptionFR,
-        avatarUrl: avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(businessName)}`,
-        bannerUrl: bannerUrl || "",
-        idNumber: idNumber,
-        idCardFrontUrl: idFrontUrl,
-        idCardBackUrl: idBackUrl,
-        languages: ["FR", "EN"],
-        created_by_admin: isAdminCreating,
-        status: "pending",
-      };
-
-      const result = await supabaseService.registerProvider(payload);
-      
-      // Update the user profile as role: provider and onboarding completed
-      if (!isAdminCreating) {
-        await supabaseService.updateUserProfile({
-          fullName: fullName || businessName,
+      if (isAdminCreating) {
+        // Admin-assisted "offline merchant" setup uses a synthetic userId with no real Supabase
+        // auth user behind it, so it stays entirely on the local mock system. Wiring this properly
+        // would require the admin to provision a real Supabase auth user first (via the service
+        // role key) — a bigger feature, out of scope for this step.
+        const result = await mockSupabase.submitProviderRegistration({
+          id: userId,
+          name: fullName || businessName,
+          businessName: businessName || fullName,
           phone: contactPhone,
           whatsappNumber: whatsappNumber,
-          role: "provider",
-          onboarding_completed: true,
+          category: mainCategory,
+          categories: [mainCategory],
+          neighborhoodId: effectiveNeighborhoodId,
+          city: city,
+          rateFCFA: displayPricing ? Number(rateFCFA) : 0,
+          rateUnit: rateUnit,
+          description: descriptionFR,
+          languages: languages,
+          avatarUrl: avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(businessName)}`,
+          bannerUrl: bannerUrl || "",
+          idNumber: idNumber,
+          idCardFrontUrl: idFrontUrl,
+          idCardBackUrl: idBackUrl,
+          created_by_admin: true,
         });
+        onSuccess(result);
+        return;
       }
 
-      onSuccess(result);
+      await supabaseService.registerServiceProvider({
+        userId,
+        businessName: businessName || fullName,
+        descriptionFR: descriptionFR,
+        descriptionEN: descriptionEN || descriptionFR,
+        bannerUrl: bannerUrl || undefined,
+        addressText: textAddress,
+        city: city,
+        neighborhoodId: effectiveNeighborhoodId,
+        latitude: gpsCoords.lat,
+        longitude: gpsCoords.lng,
+        hasFixedPricing: displayPricing,
+        basePrice: displayPricing ? Number(rateFCFA) : 0,
+        rateUnit: rateUnit,
+        languages: languages,
+        idCardNumber: idNumber,
+        idCardFrontPath: idFrontUrl || undefined,
+        idCardBackPath: idBackUrl || undefined,
+        facebook: facebook || undefined,
+        linkedin: linkedin || undefined,
+        mainCategorySlug: isOtherCategory ? undefined : mainCategory,
+        subcategory: isOtherCategory ? undefined : subcategory,
+        customDescription: isOtherCategory ? undefined : customDescription,
+        pendingCategorySuggestion: isOtherCategory
+          ? { categoryName: otherCategoryName.trim(), description: otherCategoryDescription.trim() || descriptionFR }
+          : undefined,
+      });
+
+      // Update the user's own profile: role, contact info, and profile picture (profiles.avatar_url)
+      await supabaseService.updateUserProfile({
+        fullName: fullName || businessName,
+        phone: contactPhone,
+        whatsappNumber: whatsappNumber,
+        avatarUrl: avatarUrl || undefined,
+        role: "provider",
+        onboarding_completed: true,
+      });
+
+      onSuccess({ id: userId, name: fullName || businessName, businessName, category: mainCategory });
     } catch (err: any) {
       console.error("Registration error:", err);
-      setErrorMsg(err.message || "Erreur de soumission. Veuillez réessayer.");
+      showStepError(err.message || "Erreur de soumission. Veuillez réessayer.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const subCategoriesList = [
-    { id: "plumbing", labelFR: "Plomberie 🚰", labelEN: "Plumbing 🚰", cat: ServiceCategory.CONSTRUCTION },
-    { id: "electrical", labelFR: "Électricité ⚡", labelEN: "Electrical ⚡", cat: ServiceCategory.CONSTRUCTION },
-    { id: "carpentry", labelFR: "Menuiserie 🪵", labelEN: "Carpentry 🪵", cat: ServiceCategory.CONSTRUCTION },
-    { id: "masonry", labelFR: "Maçonnerie 🧱", labelEN: "Masonry 🧱", cat: ServiceCategory.CONSTRUCTION },
-    
-    { id: "transport_truck", labelFR: "Camion de transport 🚛", labelEN: "Truck Transport 🚛", cat: ServiceCategory.TRANSPORT },
-    { id: "transport_tricycle", labelFR: "Tricycle / Moto-cargo 🛺", labelEN: "Tricycle / Cargo 🛺", cat: ServiceCategory.TRANSPORT },
-    { id: "transport_bike", labelFR: "Conducteur Moto-Taxi 🏍️", labelEN: "Moto-Taxi Rider 🏍️", cat: ServiceCategory.TRANSPORT },
-    { id: "transport_car", labelFR: "Chauffeur de voiture 🚗", labelEN: "Car Driver 🚗", cat: ServiceCategory.TRANSPORT },
-    
-    { id: "cleaning", labelFR: "Ménage & Nettoyage 🧹", labelEN: "Cleaning & Housework 🧹", cat: ServiceCategory.HOME_HELP },
-    { id: "dry_cleaning", labelFR: "Blanchisserie / Pressing 🧺", labelEN: "Laundry / Dry cleaning 🧺", cat: ServiceCategory.HOME_HELP },
-    
-    { id: "tutoring", labelFR: "Répétiteur primaire/secondaire 📚", labelEN: "Primary/Secondary Tutoring 📚", cat: ServiceCategory.EDUCATION },
-    { id: "it_services", labelFR: "Bureautique & Informatique 💻", labelEN: "IT & Office services 💻", cat: ServiceCategory.EDUCATION },
-    
-    { id: "farm_labor", labelFR: "Labour & Aide aux champs 🧑‍🌾", labelEN: "Farm labor & Tilling 🧑‍🌾", cat: ServiceCategory.AGRICULTURE },
-    { id: "livestock", labelFR: "Soin bétail / Élevage 🐓", labelEN: "Livestock care 🐓", cat: ServiceCategory.AGRICULTURE },
-    
-    { id: "childcare", labelFR: "Garde d'enfants à domicile 👶", labelEN: "Home Childcare 👶", cat: ServiceCategory.CHILDCARE },
-    
-    { id: "tailoring_dress", labelFR: "Couture Robes & Tenues de fête 👗", labelEN: "Tailoring Dresses & Pagne 👗", cat: ServiceCategory.TAILORING },
-    { id: "tailoring_alter", labelFR: "Retouches de vêtements 🪡", labelEN: "Clothing alterations 🪡", cat: ServiceCategory.TAILORING },
-    
-    { id: "tech_fridge", labelFR: "Réparateur Frigo & Climatisation ❄️", labelEN: "Fridge & AC Repair ❄️", cat: ServiceCategory.HEALTH },
-    { id: "tech_phone", labelFR: "Dépannage Téléphone / Électronique 📱", labelEN: "Phone & Electronics Repair 📱", cat: ServiceCategory.HEALTH },
-    { id: "tech_tv", labelFR: "Dépannage Télévision / Radio 📺", labelEN: "TV & Radio troubleshooting 📺", cat: ServiceCategory.HEALTH },
-    
-    { id: "delivery_gas", labelFR: "Livraison de Gaz Domestique 🔋", labelEN: "Gas cylinder delivery 🔋", cat: ServiceCategory.TRANSPORT },
-    { id: "delivery_wood", labelFR: "Fournisseur de bois de chauffe 🪵", labelEN: "Firewood Delivery 🪵", cat: ServiceCategory.TRANSPORT },
-    
-    { id: "trash_collection", labelFR: "Ramassage d'ordures 🗑️", labelEN: "Trash collection 🗑️", cat: ServiceCategory.HOME_HELP },
-    { id: "content_creation", labelFR: "Créateur de contenu / Sono / Photo 📸", labelEN: "Content creation / Photo / Sound 📸", cat: ServiceCategory.EDUCATION },
-    { id: "buy_sell_gadgets", labelFR: "Vente/Achat Gadgets & Électronique 🔌", labelEN: "Gadgets buy/sell 🔌", cat: ServiceCategory.EDUCATION },
-  ];
+  const subCategoriesList = SUB_CATEGORIES;
 
   const handleSubCategoryToggle = (id: string) => {
     if (selectedSubCategories.includes(id)) {
@@ -326,8 +385,181 @@ export default function ProviderWizard({
     }
   };
 
+  const availableLanguages = ["FR", "EN", "Gbaya", "Makaa", "Fulfulde"];
+  const handleLanguageToggle = (l: string) => {
+    if (languages.includes(l)) {
+      setLanguages(languages.filter((x) => x !== l));
+    } else {
+      setLanguages([...languages, l]);
+    }
+  };
+
   const handleMapClick = (lat: number, lng: number) => {
     setGpsCoords({ lat, lng });
+  };
+
+  // Loads a bundled image asset (e.g. the app logo) into a data URL, since jsPDF's addImage
+  // needs raster data rather than a plain asset URL to embed it in the document.
+  const loadImageAsDataUrl = (url: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Canvas context unavailable"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        resolve(canvas.toDataURL("image/jpeg"));
+      };
+      img.onerror = () => reject(new Error("Logo failed to load"));
+      img.src = url;
+    });
+
+  // Client-side PDF of everything entered so far, so the provider has a record of their
+  // submission independent of the platform. Built as a bordered, sectioned document (logo header,
+  // labeled boxes per topic, footer with date) rather than a flat text dump.
+  const handleDownloadPdf = async () => {
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 14;
+    const contentWidth = pageWidth - margin * 2;
+
+    let logoDataUrl: string | null = null;
+    try {
+      logoDataUrl = await loadImageAsDataUrl(brandLogo);
+    } catch {
+      logoDataUrl = null;
+    }
+
+    const builtInCategory = CATEGORY_DETAILS[mainCategory as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+    const liveCategory = allCategories.find((c) => c.slug === mainCategory);
+    const categoryLabel = isOtherCategory
+      ? `${otherCategoryName || "-"} (${lang === "fr" ? "en attente d'approbation" : "pending approval"})`
+      : lang === "fr" ? (builtInCategory?.nameFR || liveCategory?.nameFr || mainCategory) : (builtInCategory?.nameEN || liveCategory?.nameEn || mainCategory);
+    const neighborhoodLabel = toTitleCase(
+      useFreeTextNeighborhood ? neighborhoodFreeText : BERTOUA_NEIGHBORHOODS.find((n) => n.id === neighborhoodId)?.name || neighborhoodId
+    );
+
+    // ---- Header band with logo + title ----
+    const headerHeight = 30;
+    doc.setFillColor(69, 39, 19);
+    doc.rect(0, 0, pageWidth, headerHeight, "F");
+    if (logoDataUrl) {
+      doc.addImage(logoDataUrl, "JPEG", margin, 5, 20, 20);
+    }
+    const titleX = logoDataUrl ? margin + 26 : margin;
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("ONE VILLAGE", titleX, 15);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text(lang === "fr" ? "Résumé d'inscription prestataire" : "Provider Registration Summary", titleX, 22);
+
+    // ---- Pending verification badge ----
+    const badgeText = lang === "fr" ? "EN ATTENTE DE VÉRIFICATION" : "PENDING VERIFICATION";
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "bold");
+    const badgeWidth = doc.getTextWidth(badgeText) + 8;
+    doc.setFillColor(217, 119, 6);
+    doc.roundedRect(pageWidth - margin - badgeWidth, headerHeight + 4, badgeWidth, 7, 2, 2, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.text(badgeText, pageWidth - margin - badgeWidth + 4, headerHeight + 9);
+
+    let y = headerHeight + 18;
+
+    // Draws a bordered, titled box with label/value rows, wrapping to a new page if needed.
+    const drawSection = (title: string, rows: [string, string][]) => {
+      const rowLines = rows.map(([label, value]) => {
+        const wrapped = doc.splitTextToSize(String(value || "-"), contentWidth - 55);
+        return { label, wrapped: (Array.isArray(wrapped) ? wrapped : [wrapped]) as string[] };
+      });
+      const titleHeight = 9;
+      const padding = 6;
+      const rowsHeight = rowLines.reduce((sum, r) => sum + r.wrapped.length * 5.5, 0);
+      const boxHeight = titleHeight + rowsHeight + padding * 2;
+
+      if (y + boxHeight > pageHeight - 20) {
+        doc.addPage();
+        y = 20;
+      }
+
+      doc.setDrawColor(230, 200, 150);
+      doc.setFillColor(250, 248, 245);
+      doc.roundedRect(margin, y, contentWidth, boxHeight, 3, 3, "FD");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(120, 53, 15);
+      doc.text(title.toUpperCase(), margin + 5, y + 8);
+
+      let rowY = y + titleHeight + padding;
+      rowLines.forEach(({ label, wrapped }) => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9);
+        doc.setTextColor(40, 30, 20);
+        doc.text(`${label}:`, margin + 5, rowY);
+        doc.setFont("helvetica", "normal");
+        doc.text(wrapped, margin + 55, rowY);
+        rowY += wrapped.length * 5.5;
+      });
+
+      y += boxHeight + 6;
+    };
+
+    drawSection(lang === "fr" ? "Informations sur l'activité" : "Business Info", [
+      [lang === "fr" ? "Nom de l'activité" : "Business name", businessName || fullName || "-"],
+      [lang === "fr" ? "Catégorie" : "Category", categoryLabel],
+    ]);
+
+    drawSection(lang === "fr" ? "Localisation" : "Location", [
+      [lang === "fr" ? "Quartier" : "Neighborhood", `${neighborhoodLabel} (${city})`],
+      [lang === "fr" ? "Adresse" : "Address", textAddress || "-"],
+      [lang === "fr" ? "Coordonnées GPS" : "GPS coordinates", `${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)}`],
+    ]);
+
+    drawSection(lang === "fr" ? "Contact" : "Contact", [
+      [lang === "fr" ? "Téléphone" : "Phone", contactPhone],
+      [lang === "fr" ? "WhatsApp" : "WhatsApp", whatsappNumber],
+      [lang === "fr" ? "Email" : "Email", email || "-"],
+    ]);
+
+    drawSection(lang === "fr" ? "Tarification" : "Pricing", [
+      [lang === "fr" ? "Tarif" : "Rate", displayPricing ? `${rateFCFA} FCFA / ${rateUnit}` : (lang === "fr" ? "Sur devis" : "Quote on request")],
+    ]);
+
+    drawSection(lang === "fr" ? "Langues" : "Languages", [
+      [lang === "fr" ? "Langues parlées" : "Languages spoken", languages.join(", ") || "-"],
+    ]);
+
+    drawSection(lang === "fr" ? "Description" : "Description", [
+      [lang === "fr" ? "Description (FR)" : "Description (FR)", descriptionFR || "-"],
+    ]);
+
+    // ---- Footer on every page ----
+    const pageCount = doc.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setDrawColor(230, 200, 150);
+      doc.line(margin, pageHeight - 15, pageWidth - margin, pageHeight - 15);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(140, 110, 80);
+      doc.text(
+        `${lang === "fr" ? "Généré le" : "Generated on"} ${new Date().toISOString().split("T")[0]} — ONE VILLAGE`,
+        margin,
+        pageHeight - 9
+      );
+      doc.text(`${i} / ${pageCount}`, pageWidth - margin - 12, pageHeight - 9);
+    }
+
+    doc.save(`one-village-${(businessName || fullName || "provider").replace(/\s+/g, "_")}.pdf`);
   };
 
   return (
@@ -358,7 +590,7 @@ export default function ProviderWizard({
       </div>
 
       {errorMsg && (
-        <div className="bg-red-50 border border-red-200 text-red-800 rounded-2xl p-4 text-xs font-bold flex items-center gap-2">
+        <div ref={errorBannerRef} className="bg-red-50 border border-red-200 text-red-800 rounded-2xl p-4 text-xs font-bold flex items-center gap-2">
           <Info className="w-4.5 h-4.5 text-red-600 shrink-0" />
           <span>{errorMsg}</span>
         </div>
@@ -385,17 +617,62 @@ export default function ProviderWizard({
               {lang === "fr" ? "Catégorie Principale" : "Primary Category"}
             </label>
             <select
-              value={mainCategory}
-              onChange={(e) => setMainCategory(e.target.value as ServiceCategory)}
+              value={isOtherCategory ? "OTHER" : mainCategory}
+              onChange={(e) => {
+                if (e.target.value === "OTHER") {
+                  setIsOtherCategory(true);
+                } else {
+                  setIsOtherCategory(false);
+                  setMainCategory(e.target.value);
+                }
+              }}
               className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none"
             >
-              {Object.values(ServiceCategory).map((cat) => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
+              {allCategories.map((cat) => {
+                const builtIn = CATEGORY_DETAILS[cat.slug as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+                return (
+                  <option key={cat.slug} value={cat.slug}>
+                    {lang === "fr" ? (builtIn?.nameFR || cat.nameFr) : (builtIn?.nameEN || cat.nameEn)}
+                  </option>
+                );
+              })}
+              <option value="OTHER">{lang === "fr" ? "Autre — à préciser" : "Other — specify"}</option>
             </select>
           </div>
+
+          {isOtherCategory && (
+            <div className="space-y-3 p-4 border border-amber-200 rounded-2xl bg-amber-50/30 animate-fade-in">
+              <p className="text-[10px] text-amber-800 font-serif">
+                {lang === "fr"
+                  ? "Cette catégorie sera soumise à l'administration pour approbation. Votre profil sera tout de même publié, avec la mention « en attente d'approbation »."
+                  : "This category will be submitted to the admin team for approval. Your profile will still be published, marked as \"pending review\"."}
+              </p>
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-black text-amber-950 uppercase tracking-wider block">
+                  {lang === "fr" ? "Nom de la nouvelle catégorie" : "New category name"}
+                </label>
+                <input
+                  type="text"
+                  value={otherCategoryName}
+                  onChange={(e) => setOtherCategoryName(e.target.value)}
+                  placeholder={lang === "fr" ? "ex: Coiffure & Beauté" : "e.g. Hairdressing & Beauty"}
+                  className="w-full bg-white border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-black text-amber-950 uppercase tracking-wider block">
+                  {lang === "fr" ? "Décrivez ce service précisément" : "Describe this specific service"}
+                </label>
+                <textarea
+                  rows={2}
+                  value={otherCategoryDescription}
+                  onChange={(e) => setOtherCategoryDescription(e.target.value)}
+                  placeholder={lang === "fr" ? "ex: Tresses, coiffures traditionnelles, soins capillaires..." : "e.g. Braiding, traditional hairstyles, hair care..."}
+                  className="w-full bg-white border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-serif"
+                />
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <div className="flex justify-between items-center">
@@ -412,7 +689,7 @@ export default function ProviderWizard({
               </button>
             </div>
             <textarea
-              required
+              ref={descriptionFRRef}
               rows={4}
               value={descriptionFR}
               onChange={(e) => setDescriptionFR(e.target.value)}
@@ -433,12 +710,50 @@ export default function ProviderWizard({
               className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 font-serif leading-relaxed"
             />
           </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-black text-amber-950 uppercase tracking-wider block">
+              {lang === "fr" ? "Langues parlées" : "Languages Spoken"}
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {availableLanguages.map((l) => {
+                const isSelected = languages.includes(l);
+                return (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => handleLanguageToggle(l)}
+                    className={`px-3 py-1.5 rounded-lg border text-[11px] font-bold cursor-pointer transition-all ${
+                      isSelected
+                        ? "bg-amber-800 border-amber-800 text-white shadow-sm"
+                        : "bg-[#FAF8F5] border-amber-200/60 text-amber-950 hover:bg-amber-100/30"
+                    }`}
+                  >
+                    {l}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
 
       {/* STEP 2: Sub-categories Selection */}
       {step === 2 && (
         <div className="space-y-5 animate-fade-in">
+          {isOtherCategory ? (
+            <div className="p-6 border border-dashed border-amber-200 rounded-2xl bg-amber-50/20 text-center space-y-2">
+              <p className="text-xs font-bold text-amber-950">
+                {lang === "fr" ? "Aucune sous-catégorie requise" : "No sub-categories needed"}
+              </p>
+              <p className="text-[11px] text-amber-800/80 font-serif">
+                {lang === "fr"
+                  ? `Vous avez proposé une nouvelle catégorie : "${otherCategoryName || "..."}". Continuez vers l'étape suivante.`
+                  : `You suggested a new category: "${otherCategoryName || "..."}". Continue to the next step.`}
+              </p>
+            </div>
+          ) : (
+            <>
           <div>
             <h4 className="font-bold text-xs text-amber-950 uppercase tracking-wide">
               {lang === "fr" ? "Services proposés au village" : "Select Your Specific Services"}
@@ -506,6 +821,8 @@ export default function ProviderWizard({
               * {lang === "fr" ? "La saisie d'un autre service l'envoie dans la liste d'attente d'approbation administrative." : "Adding another specialty will place it in the admin category-review queue."}
             </p>
           </div>
+            </>
+          )}
         </div>
       )}
 
@@ -529,8 +846,15 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Quartier de référence" : "Neighborhood reference"}
               </label>
               <select
-                value={neighborhoodId}
-                onChange={(e) => setNeighborhoodId(e.target.value)}
+                value={useFreeTextNeighborhood ? OTHER_NEIGHBORHOOD_VALUE : neighborhoodId}
+                onChange={(e) => {
+                  if (e.target.value === OTHER_NEIGHBORHOOD_VALUE) {
+                    setUseFreeTextNeighborhood(true);
+                  } else {
+                    setUseFreeTextNeighborhood(false);
+                    setNeighborhoodId(e.target.value);
+                  }
+                }}
                 className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none"
               >
                 {BERTOUA_NEIGHBORHOODS.map((nh) => (
@@ -538,7 +862,19 @@ export default function ProviderWizard({
                     {nh.name}
                   </option>
                 ))}
+                <option value={OTHER_NEIGHBORHOOD_VALUE}>
+                  {lang === "fr" ? "Autre (taper mon quartier)" : "Other (type my neighborhood)"}
+                </option>
               </select>
+              {useFreeTextNeighborhood && (
+                <input
+                  type="text"
+                  value={neighborhoodFreeText}
+                  onChange={(e) => setNeighborhoodFreeText(e.target.value)}
+                  placeholder={lang === "fr" ? "Nom de votre quartier" : "Your neighborhood name"}
+                  className="w-full bg-[#FAF8F5] border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800 mt-1.5"
+                />
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -554,61 +890,17 @@ export default function ProviderWizard({
             </div>
           </div>
 
-          {/* Interactive Map Mockup */}
+          {/* Real Interactive Map (Leaflet + OpenStreetMap) */}
           <div className="space-y-2">
             <span className="text-[10px] font-black text-amber-950 uppercase tracking-wider block">
               {lang === "fr" ? "Carte Interactive de Bertoua" : "Interactive Map of Bertoua"}
             </span>
-            <div className="relative h-48 bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden cursor-crosshair group shadow-inner">
-              {/* Fake abstract map elements representing major landmarks in Bertoua */}
-              <div className="absolute top-4 left-6 bg-emerald-100 text-emerald-800 text-[9px] px-2 py-0.5 rounded border border-emerald-200 font-bold">
-                Mokolo Market
-              </div>
-              <div className="absolute bottom-6 right-12 bg-blue-100 text-blue-800 text-[9px] px-2 py-0.5 rounded border border-blue-200 font-bold">
-                Tigaza Station
-              </div>
-              <div className="absolute top-1/2 left-1/3 -translate-y-1/2 bg-orange-100 text-orange-800 text-[9px] px-2 py-0.5 rounded border border-orange-200 font-bold">
-                Kano Commercial
-              </div>
-              <div className="absolute bottom-1/3 left-6 bg-purple-100 text-purple-800 text-[9px] px-2 py-0.5 rounded border border-purple-200 font-bold">
-                Ndouan Farmland
-              </div>
-
-              {/* Grid line grid */}
-              <div className="absolute inset-0 bg-[linear-gradient(to_right,#e5e7eb_1px,transparent_1px),linear-gradient(to_bottom,#e5e7eb_1px,transparent_1px)] bg-[size:1.5rem_1.5rem] opacity-30" />
-
-              {/* Map click listener wrapper */}
-              <div
-                className="absolute inset-0 z-10"
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const x = ((e.clientX - rect.left) / rect.width) * 100;
-                  const y = ((e.clientY - rect.top) / rect.height) * 100;
-                  // Map relative cords to Bertoua-like lat/lng
-                  const calculatedLat = 4.5772 + (y - 50) * -0.001;
-                  const calculatedLng = 13.6826 + (x - 50) * 0.001;
-                  handleMapClick(calculatedLat, calculatedLng);
-                }}
-              />
-
-              {/* Placed PIN representation */}
-              <div
-                className="absolute z-20 -translate-x-1/2 -translate-y-full transition-all duration-300"
-                style={{
-                  left: `${((gpsCoords.lng - 13.6826) / 0.001 + 50)}%`,
-                  top: `${((gpsCoords.lat - 4.5772) / -0.001 + 50)}%`,
-                }}
-              >
-                <div className="flex flex-col items-center">
-                  <div className="bg-amber-800 text-white text-[9px] font-bold px-2 py-1 rounded shadow-lg whitespace-nowrap mb-0.5 flex items-center gap-1">
-                    <MapPin className="w-2.5 h-2.5" />
-                    Mon Emplacement / My Spot
-                  </div>
-                  <div className="w-2.5 h-2.5 bg-amber-800 rounded-full border-2 border-white animate-ping absolute bottom-0" />
-                  <div className="w-3 h-3 bg-amber-800 rounded-full border-2 border-white" />
-                </div>
-              </div>
-            </div>
+            <p className="text-[10px] text-amber-800/70 font-serif">
+              {lang === "fr"
+                ? "Cliquez sur la carte ou déplacez le repère ambré pour ajuster votre position exacte."
+                : "Click on the map or drag the amber pin to fine-tune your exact position."}
+            </p>
+            <BertouaMap lat={gpsCoords.lat} lng={gpsCoords.lng} onChange={handleMapClick} lang={lang} />
             <div className="flex justify-between items-center text-[10px] text-amber-800 font-medium font-mono">
               <span>Latitude: {gpsCoords.lat.toFixed(5)}</span>
               <span>Longitude: {gpsCoords.lng.toFixed(5)}</span>
@@ -620,8 +912,8 @@ export default function ProviderWizard({
               {lang === "fr" ? "Adresse Physique (Texte)" : "Physical Address / Landmarks"}
             </label>
             <input
+              ref={textAddressRef}
               type="text"
-              required
               value={textAddress}
               onChange={(e) => setTextAddress(e.target.value)}
               placeholder="e.g. En face de la Boulangerie du Centre, à côté du tailleur"
@@ -640,8 +932,8 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Téléphone Mobile Money (+237)" : "Mobile Money Phone (+237)"}
               </label>
               <input
+                ref={contactPhoneRef}
                 type="tel"
-                required
                 value={contactPhone}
                 onChange={(e) => setContactPhone(e.target.value)}
                 placeholder="+237 6xx xx xx xx"
@@ -654,8 +946,8 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Numéro WhatsApp (+237)" : "WhatsApp Number (+237)"}
               </label>
               <input
+                ref={whatsappNumberRef}
                 type="tel"
-                required
                 value={whatsappNumber}
                 onChange={(e) => setWhatsappNumber(e.target.value)}
                 placeholder="+237 6xx xx xx xx"
@@ -821,7 +1113,7 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Choisir Photo" : "Select Avatar"}
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={IMAGE_ACCEPT}
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
@@ -835,7 +1127,7 @@ export default function ProviderWizard({
             {/* Banner/Flyer block */}
             <div className="border border-amber-100 p-5 rounded-2xl bg-[#FAF8F5] flex flex-col items-center text-center space-y-4">
               <span className="text-[10px] font-black text-amber-950 uppercase tracking-wider block">
-                {lang === "fr" ? "Bannière / Flyer d'activité" : "Banner / Activity Flyer"}
+                {lang === "fr" ? "Bannière / Flyer d'activité (optionnel)" : "Banner / Activity Flyer (optional)"}
               </span>
               <div className="w-full h-20 bg-amber-50 border border-amber-200/60 rounded-xl flex items-center justify-center overflow-hidden shadow-inner relative">
                 {bannerFile ? (
@@ -854,7 +1146,7 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Choisir Flyer" : "Select Flyer"}
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={IMAGE_ACCEPT}
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
@@ -890,8 +1182,8 @@ export default function ProviderWizard({
               {lang === "fr" ? "Numéro Unique de CNI / National ID Number" : "National ID Number (CNI)"}
             </label>
             <input
+              ref={idNumberRef}
               type="text"
-              required
               value={idNumber}
               onChange={(e) => setIdNumber(e.target.value)}
               placeholder="e.g. 102394751 (9 ou 17 chiffres)"
@@ -920,7 +1212,7 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Télécharger Face" : "Upload Front"}
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={IMAGE_ACCEPT}
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
@@ -951,7 +1243,7 @@ export default function ProviderWizard({
                 {lang === "fr" ? "Télécharger Dos" : "Upload Back"}
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={IMAGE_ACCEPT}
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
@@ -980,19 +1272,27 @@ export default function ProviderWizard({
           </div>
 
           <div className="border border-amber-100 rounded-2xl bg-[#FAF8F5] p-5 space-y-4 text-xs">
-            <div className="grid grid-cols-2 gap-y-3 border-b border-amber-100/50 pb-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-4 border-b border-amber-100/50 pb-3">
               <div>
                 <span className="text-amber-800/60 font-medium block">Nom de l'Activité:</span>
                 <span className="font-bold text-amber-950">{businessName || fullName}</span>
               </div>
               <div>
                 <span className="text-amber-800/60 font-medium block">Catégorie Principale:</span>
-                <span className="font-bold text-amber-950">{mainCategory}</span>
+                <span className="font-bold text-amber-950">
+                  {isOtherCategory
+                    ? `${otherCategoryName || "—"} (${lang === "fr" ? "en attente d'approbation" : "pending approval"})`
+                    : (() => {
+                        const builtIn = CATEGORY_DETAILS[mainCategory as ServiceCategory] as { nameFR: string; nameEN: string } | undefined;
+                        const live = allCategories.find((c) => c.slug === mainCategory);
+                        return lang === "fr" ? (builtIn?.nameFR || live?.nameFr || mainCategory) : (builtIn?.nameEN || live?.nameEn || mainCategory);
+                      })()}
+                </span>
               </div>
               <div>
                 <span className="text-amber-800/60 font-medium block">Quartier à Bertoua:</span>
                 <span className="font-bold text-amber-950">
-                  {BERTOUA_NEIGHBORHOODS.find((n) => n.id === neighborhoodId)?.name} ({city})
+                  {useFreeTextNeighborhood ? toTitleCase(neighborhoodFreeText) : BERTOUA_NEIGHBORHOODS.find((n) => n.id === neighborhoodId)?.name} ({city})
                 </span>
               </div>
               <div>
@@ -1003,7 +1303,7 @@ export default function ProviderWizard({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-y-3 border-b border-amber-100/50 pb-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-4 border-b border-amber-100/50 pb-3">
               <div>
                 <span className="text-amber-800/60 font-medium block">Téléphone de Contact:</span>
                 <span className="font-bold text-amber-950 font-mono">{contactPhone}</span>
@@ -1031,15 +1331,24 @@ export default function ProviderWizard({
               </p>
             </div>
           </div>
+
+          <button
+            type="button"
+            onClick={handleDownloadPdf}
+            className="w-full sm:w-auto border border-amber-300 hover:bg-amber-100/40 text-amber-950 font-bold text-xs px-5 py-3 rounded-xl flex items-center justify-center gap-2 cursor-pointer transition-colors"
+          >
+            <Download className="w-4 h-4 text-amber-800" />
+            {lang === "fr" ? "Télécharger le résumé PDF" : "Download PDF Summary"}
+          </button>
         </div>
       )}
 
       {/* ACTIONS FOOTER */}
-      <div className="flex items-center justify-between pt-4 border-t border-amber-50">
+      <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-4 border-t border-amber-50">
         <button
           onClick={step === 1 ? onCancel : handlePrev}
           disabled={submitting || uploadingMedia}
-          className="px-4 py-3 border border-amber-200 text-amber-900 hover:bg-amber-50 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+          className="px-4 py-3 border border-amber-200 text-amber-900 hover:bg-amber-50 font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
           {step === 1 ? (lang === "fr" ? "Annuler" : "Cancel") : (lang === "fr" ? "Retour" : "Back")}
@@ -1049,7 +1358,7 @@ export default function ProviderWizard({
           <button
             onClick={handleNext}
             disabled={uploadingMedia}
-            className="bg-amber-800 hover:bg-amber-900 text-white font-black text-xs px-5 py-3 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-sm disabled:opacity-50"
+            className="bg-amber-800 hover:bg-amber-900 text-white font-black text-xs px-5 py-3 rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm disabled:opacity-50"
           >
             {uploadingMedia ? (
               <>
@@ -1067,7 +1376,7 @@ export default function ProviderWizard({
           <button
             onClick={handleSubmitRegistration}
             disabled={submitting}
-            className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-6 py-3 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-sm disabled:opacity-50"
+            className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs px-6 py-3 rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm disabled:opacity-50"
           >
             {submitting ? (
               <>
