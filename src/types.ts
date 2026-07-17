@@ -42,6 +42,10 @@ export interface UserProfile {
   rewardsCredit?: number;
   onboarding_completed?: boolean;
   email?: string;
+  // False only for a first-time OAuth (e.g. Google) sign-in, where the trigger had no client/
+  // provider metadata to go on and defaulted to "client" — gates the one-time role-selection
+  // screen. Always true for email+password signups, which choose a role in the form itself.
+  roleConfirmed?: boolean;
 }
 
 export interface Neighborhood {

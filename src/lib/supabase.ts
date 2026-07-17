@@ -33,6 +33,10 @@ function mapDbProfileToUserProfile(row: any, email?: string | null): UserProfile
     rewardsCredit: 0,
     onboarding_completed: row.role !== "provider" || onboardedLocally,
     email: email || undefined,
+    // Defaults to true (no gate shown) if the role_confirmed column doesn't exist yet on this
+    // database — i.e. before 20260724000000_google_oauth_role_confirmation.sql has been applied —
+    // rather than risk blocking every existing user behind a screen that shouldn't apply to them.
+    roleConfirmed: row.role_confirmed !== false,
   };
 }
 
@@ -456,6 +460,45 @@ export const supabaseService = {
       console.error("Supabase sign-in error:", err);
       return { success: false, message: err.message || "Email ou mot de passe incorrect." };
     }
+  },
+
+  // Redirect-based (not popup) — the current tab navigates to Google's consent screen, and Google
+  // sends it back to redirectTo with the session in the URL; supabase-js picks that up
+  // automatically on the next page load (see the existing getSession()/onAuthStateChange effect in
+  // App.tsx, which is provider-agnostic and needs no changes to handle this). Requires the Google
+  // provider to actually be enabled in the Supabase dashboard (Authentication → Providers → Google,
+  // with a Google Cloud OAuth client ID/secret) — this call will error until that's done.
+  async signInWithGoogle(): Promise<{ success: boolean; message: string }> {
+    if (!supabaseClient) {
+      return { success: false, message: "Supabase n'est pas configuré." };
+    }
+    try {
+      const { error } = await supabaseClient.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: window.location.origin },
+      });
+      if (error) throw error;
+      // On success the browser is already navigating away to Google — nothing left to return.
+      return { success: true, message: "" };
+    } catch (err: any) {
+      console.error("Supabase Google sign-in error:", err);
+      return { success: false, message: err.message || "Erreur de connexion avec Google." };
+    }
+  },
+
+  // One-time confirmation for a first-time OAuth user's client/provider choice (see role_confirmed
+  // in 20260724000000_google_oauth_role_confirmation.sql). The profiles UPDATE policy's WITH CHECK
+  // (same migration) restricts role to 'client'/'provider' regardless of what's passed here, so this
+  // can never be used to self-promote to admin even though it's a plain client-side update.
+  async confirmUserRole(userId: string, role: "client" | "provider"): Promise<UserProfile> {
+    if (!supabaseClient) throw new Error("Supabase n'est pas configuré.");
+    const { error } = await supabaseClient
+      .from("profiles")
+      .update({ role, role_confirmed: true })
+      .eq("id", userId);
+    if (error) throw error;
+    const { data: authData } = await supabaseClient.auth.getUser();
+    return fetchProfile({ id: userId, email: authData.user?.email });
   },
 
   async signOut(): Promise<void> {

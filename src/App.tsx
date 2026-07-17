@@ -126,6 +126,12 @@ export default function App() {
   const [otpSubmitting, setOtpSubmitting] = useState(false);
   const [otpResendCooldown, setOtpResendCooldown] = useState(0);
 
+  // First-time Google (or any future OAuth provider) sign-in role picker — see roleConfirmed on
+  // UserProfile. Separate error/submitting state from the auth modal's since this screen renders in
+  // the main body (currentUser is already set), not inside showAuthModal.
+  const [roleConfirmSubmitting, setRoleConfirmSubmitting] = useState(false);
+  const [roleConfirmError, setRoleConfirmError] = useState("");
+
   useEffect(() => {
     if (otpResendCooldown <= 0) return;
     const timer = setTimeout(() => setOtpResendCooldown((s) => s - 1), 1000);
@@ -629,6 +635,19 @@ export default function App() {
     }
   };
 
+  // Sign in / sign up with Google. Redirect-based — this call navigates the tab away to Google's
+  // consent screen on success, so there's no "logged in" branch here at all; the existing
+  // getSession()/onAuthStateChange effect picks up the resulting session when Google redirects back
+  // (same code path as a page refresh — provider-agnostic, needs no changes for this).
+  const handleGoogleSignIn = async () => {
+    setErrorMsg("");
+    setSuccessMsg("");
+    const res = await supabaseService.signInWithGoogle();
+    if (!res.success) {
+      setErrorMsg(res.message || (lang === "fr" ? "Erreur de connexion avec Google." : "Google sign-in error."));
+    }
+  };
+
   // Verifies the code emailed for signup confirmation (see supabaseService.verifySignupOtp —
   // Supabase's auth.verifyOtp with type "signup", not a passwordless flow; email+password from
   // handleSignUp remains the actual credential, this only confirms the address). The code itself
@@ -701,6 +720,26 @@ export default function App() {
     setErrorMsg("");
     setSuccessMsg("");
     setAuthTab("signin");
+  };
+
+  // First-time Google sign-in: the trigger had no client/provider metadata to go on and defaulted
+  // to "client" (see 20260724000000_google_oauth_role_confirmation.sql) — this is what actually
+  // records their real choice. Afterwards the normal onboarding_completed gate takes over exactly
+  // as it already does for a fresh email+password provider signup (ProviderWizard etc.), unchanged.
+  const handleConfirmRole = async (role: "client" | "provider") => {
+    if (!currentUser) return;
+    setRoleConfirmSubmitting(true);
+    setRoleConfirmError("");
+    try {
+      const updated = await supabaseService.confirmUserRole(currentUser.id, role);
+      setCurrentUser(updated);
+    } catch (err: any) {
+      setRoleConfirmError(
+        err.message || (lang === "fr" ? "Erreur lors de l'enregistrement de votre choix." : "Error saving your choice.")
+      );
+    } finally {
+      setRoleConfirmSubmitting(false);
+    }
   };
 
   // Logout
@@ -1346,8 +1385,66 @@ export default function App() {
       {/* Main Body */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
-        {/* IF USER LOGGED IN BUT NOT COMPLETED ONBOARDING -> RENDER ONBOARDING FLOW EXCLUSIVELY */}
-        {currentUser && !currentUser.onboarding_completed ? (
+        {/* IF LOGGED IN VIA GOOGLE (OR ANY FUTURE OAUTH PROVIDER) FOR THE FIRST TIME AND ROLE ISN'T
+            CONFIRMED YET -> ASK THE "LOOKING FOR SERVICES" VS "OFFERING SERVICES" QUESTION THAT
+            GOOGLE HAS NO WAY TO ANSWER FOR US. Sits ahead of the onboarding_completed gate below —
+            once confirmed, currentUser.role updates and that gate takes over exactly as it already
+            does for a fresh email+password provider signup. */}
+        {currentUser && !currentUser.roleConfirmed ? (
+          <div className="animate-fade-in max-w-lg mx-auto py-12">
+            <div className="bg-white border border-amber-100 rounded-3xl shadow-sm p-6 sm:p-8 space-y-5 text-center">
+              <div>
+                <h2 className="text-lg font-black text-amber-950">
+                  {lang === "fr" ? `Bienvenue, ${currentUser.fullName || ""} !` : `Welcome, ${currentUser.fullName || ""}!`}
+                </h2>
+                <p className="text-xs text-amber-800 font-serif mt-1.5">
+                  {lang === "fr"
+                    ? "Une dernière chose avant de continuer :"
+                    : "One last thing before you continue:"}
+                </p>
+              </div>
+
+              {roleConfirmError && (
+                <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3 text-xs font-bold flex items-center gap-2 text-left">
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span>{roleConfirmError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  disabled={roleConfirmSubmitting}
+                  onClick={() => handleConfirmRole("client")}
+                  className="flex flex-col items-center gap-2 p-5 rounded-2xl border-2 border-amber-100 hover:border-[#E3A23D] hover:bg-amber-50/50 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <Search className="w-6 h-6 text-amber-800" />
+                  <span className="text-xs font-black text-amber-950">
+                    {lang === "fr" ? "Je cherche un service" : "I'm looking for services"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={roleConfirmSubmitting}
+                  onClick={() => handleConfirmRole("provider")}
+                  className="flex flex-col items-center gap-2 p-5 rounded-2xl border-2 border-amber-100 hover:border-[#E3A23D] hover:bg-amber-50/50 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <Briefcase className="w-6 h-6 text-amber-800" />
+                  <span className="text-xs font-black text-amber-950">
+                    {lang === "fr" ? "Je propose un service" : "I offer services"}
+                  </span>
+                </button>
+              </div>
+
+              {roleConfirmSubmitting && (
+                <div className="flex items-center justify-center gap-1.5 text-xs text-amber-800">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {lang === "fr" ? "Enregistrement..." : "Saving..."}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : currentUser && !currentUser.onboarding_completed ? (
           <div className="animate-fade-in max-w-4xl mx-auto py-4">
             <OnboardingFlow
               lang={lang}
@@ -2568,7 +2665,34 @@ export default function App() {
                   </button>
                 </div>
               </div>
-            ) : authTab === "signup" ? (
+            ) : (
+              <>
+                {/* Google sign-in/up — shared across both tabs, shown once here rather than
+                    duplicated inside each form below. Redirect-based: this navigates the tab away
+                    on click, so there's no loading state to manage beyond the button itself. */}
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  className="w-full py-3 bg-white hover:bg-amber-50 text-amber-950 text-xs font-bold rounded-xl border border-amber-200 transition-all cursor-pointer flex items-center justify-center gap-2.5"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 48 48" aria-hidden="true">
+                    <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12 s5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24s8.955,20,20,20 s20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
+                    <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039 l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
+                    <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36 c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
+                    <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571 c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
+                  </svg>
+                  {lang === "fr" ? "Continuer avec Google" : "Continue with Google"}
+                </button>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 border-t border-amber-100" />
+                  <span className="text-[10px] font-bold text-amber-800/60 uppercase tracking-wider">
+                    {lang === "fr" ? "ou" : "or"}
+                  </span>
+                  <div className="flex-1 border-t border-amber-100" />
+                </div>
+
+                {authTab === "signup" ? (
               <form onSubmit={handleSignUp} className="space-y-4">
                 {/* Role selector */}
                 <div className="flex bg-amber-50 p-1 rounded-xl border border-amber-100">
@@ -2696,6 +2820,8 @@ export default function App() {
                   {lang === "fr" ? "Se connecter" : "Sign In"}
                 </button>
               </form>
+            )}
+              </>
             )}
           </div>
         </div>

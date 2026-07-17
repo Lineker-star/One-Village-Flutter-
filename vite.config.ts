@@ -31,6 +31,14 @@ export default defineConfig(() => {
           // Precache the built app shell (hashed JS/CSS bundles, index.html, icons, images under
           // dist/assets) so the shell loads instantly and works offline for pages already visited.
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,jpeg,svg,webp,avif,woff,woff2}'],
+          // workbox's own default cap is 2 MiB; this app's single main JS bundle (no code-splitting
+          // yet — see the "chunks larger than 500 kB" build warning) already exceeds that, which
+          // fails the build outright rather than silently skipping it. Raised with headroom above
+          // the current ~2.1 MB rather than tuned to the exact byte count, so routine dependency
+          // growth doesn't immediately re-trigger this. Splitting the bundle (dynamic imports/
+          // manualChunks) would be the real long-term fix, not attempted here since it's unrelated
+          // to Google sign-in and touches build config, not this feature.
+          maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
           // CRITICAL: no runtimeCaching entries exist for this app's own /api/* routes or for the
           // Supabase REST/Realtime domain — meaning the service worker NEVER intercepts or caches
           // them; every request for providers, bookings, chats, job postings, etc. always goes
