@@ -20,7 +20,10 @@ dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 const app = express();
-const PORT = 3000;
+// Render (and most Node hosts) assign the actual listening port dynamically via process.env.PORT —
+// binding to a hardcoded 3000 regardless would make the deployed service unreachable, since Render's
+// router only forwards traffic to the port it told the app to use. 3000 remains the local-dev fallback.
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
@@ -1510,7 +1513,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server listening on port ${PORT}`);
   });
 }
 
