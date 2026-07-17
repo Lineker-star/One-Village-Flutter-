@@ -116,6 +116,11 @@ export default function App() {
   // is what switches the auth modal from the signin/signup tabs to the "enter your code" screen —
   // set right after a fresh signup that needs confirming, or when a sign-in attempt bounces off an
   // unconfirmed account.
+  // Supabase's actual OTP code length isn't fixed (this project's dashboard sends 8 digits; other
+  // projects may send 6) and isn't configurable from the dashboard, so this only bounds obviously-
+  // invalid input rather than assuming a specific length — never truncate a real code.
+  const OTP_MIN_LENGTH = 6;
+  const OTP_MAX_LENGTH = 10;
   const [pendingOtpEmail, setPendingOtpEmail] = useState<string | null>(null);
   const [otpCode, setOtpCode] = useState("");
   const [otpSubmitting, setOtpSubmitting] = useState(false);
@@ -624,17 +629,18 @@ export default function App() {
     }
   };
 
-  // Verifies the 6-digit code emailed for signup confirmation (see supabaseService.verifySignupOtp
-  // — Supabase's auth.verifyOtp with type "signup", not a passwordless flow; email+password from
-  // handleSignUp remains the actual credential, this only confirms the address).
+  // Verifies the code emailed for signup confirmation (see supabaseService.verifySignupOtp —
+  // Supabase's auth.verifyOtp with type "signup", not a passwordless flow; email+password from
+  // handleSignUp remains the actual credential, this only confirms the address). The code itself
+  // is passed through untouched regardless of its length — see OTP_MIN_LENGTH/OTP_MAX_LENGTH above.
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pendingOtpEmail) return;
     setErrorMsg("");
     setSuccessMsg("");
 
-    if (otpCode.trim().length !== 6) {
-      setErrorMsg(lang === "fr" ? "Veuillez saisir le code à 6 chiffres." : "Please enter the 6-digit code.");
+    if (otpCode.trim().length < OTP_MIN_LENGTH) {
+      setErrorMsg(lang === "fr" ? "Veuillez saisir le code reçu par email." : "Please enter the code you received by email.");
       return;
     }
 
@@ -2511,7 +2517,7 @@ export default function App() {
                     {lang === "fr" ? "Vérifiez votre e-mail" : "Check your email"}
                   </h3>
                   <p className="text-xs text-amber-800 font-serif">
-                    {lang === "fr" ? "Entrez le code à 6 chiffres envoyé à " : "Enter the 6-digit code sent to "}
+                    {lang === "fr" ? "Entrez le code reçu par e-mail à " : "Enter the code you received by email at "}
                     <strong className="text-amber-950">{pendingOtpEmail}</strong>.
                   </p>
                 </div>
@@ -2521,16 +2527,16 @@ export default function App() {
                     type="text"
                     inputMode="numeric"
                     autoComplete="one-time-code"
-                    maxLength={6}
+                    maxLength={OTP_MAX_LENGTH}
                     autoFocus
                     value={otpCode}
-                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    placeholder="000000"
-                    className="w-full text-center tracking-[0.6em] text-lg font-mono bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, OTP_MAX_LENGTH))}
+                    placeholder={lang === "fr" ? "Code reçu par e-mail" : "Code from your email"}
+                    className="w-full text-center tracking-[0.4em] text-lg font-mono bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
                   />
                   <button
                     type="submit"
-                    disabled={otpSubmitting || otpCode.length !== 6}
+                    disabled={otpSubmitting || otpCode.trim().length < OTP_MIN_LENGTH}
                     className="w-full py-3 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
                     {otpSubmitting ? (

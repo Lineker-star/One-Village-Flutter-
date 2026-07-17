@@ -400,11 +400,13 @@ export const supabaseService = {
     }
   },
 
-  // Verifies the 6-digit code emailed by Supabase for the "Confirm signup" flow (type: "signup" —
-  // NOT the same as a passwordless signInWithOtp; email+password from signUp() above remains the
-  // actual credential, this just confirms the address). Requires the Supabase dashboard's "Confirm
-  // signup" email template to actually include {{ .Token }} — see the migration notes this ships
-  // with for exact steps. On success this returns a real session directly, same as signIn.
+  // Verifies the code emailed by Supabase for the "Confirm signup" flow (type: "signup" — NOT the
+  // same as a passwordless signInWithOtp; email+password from signUp() above remains the actual
+  // credential, this just confirms the address). token is passed through as-is regardless of its
+  // length — Supabase's OTP length varies by project (this one sends 8 digits) and isn't something
+  // to assume or validate here. Requires the Supabase dashboard's "Confirm signup" email template
+  // to actually include {{ .Token }} — see the migration notes this ships with for exact steps.
+  // On success this returns a real session directly, same as signIn.
   async verifySignupOtp(email: string, token: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
     if (!supabaseClient) {
       return { success: false, message: "Supabase n'est pas configuré." };
