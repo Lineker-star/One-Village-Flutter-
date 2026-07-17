@@ -361,7 +361,7 @@ export const supabaseService = {
     phone?: string;
     role: "client" | "provider";
     preferredLanguage: "fr" | "en";
-  }): Promise<{ success: boolean; user?: UserProfile; message: string }> {
+  }): Promise<{ success: boolean; user?: UserProfile; message: string; needsVerification?: boolean }> {
     if (!supabaseClient) {
       return { success: false, message: "Supabase n'est pas configuré. Contactez l'administrateur." };
     }
@@ -383,9 +383,12 @@ export const supabaseService = {
         return { success: false, message: "Inscription impossible. Veuillez réessayer." };
       }
       if (!data.session) {
-        // Email confirmation is required before a session (and profile) can be fetched.
+        // Email OTP verification is required before a session (and profile) can be fetched — see
+        // verifySignupOtp below. needsVerification is a distinct signal from success/user so the
+        // caller doesn't have to infer "needs OTP" from the absence of a user.
         return {
           success: true,
+          needsVerification: true,
           message: "Compte créé ! Vérifiez votre boîte e-mail pour confirmer votre adresse avant de vous connecter.",
         };
       }
@@ -394,6 +397,46 @@ export const supabaseService = {
     } catch (err: any) {
       console.error("Supabase sign-up error:", err);
       return { success: false, message: err.message || "Erreur d'inscription." };
+    }
+  },
+
+  // Verifies the 6-digit code emailed by Supabase for the "Confirm signup" flow (type: "signup" —
+  // NOT the same as a passwordless signInWithOtp; email+password from signUp() above remains the
+  // actual credential, this just confirms the address). Requires the Supabase dashboard's "Confirm
+  // signup" email template to actually include {{ .Token }} — see the migration notes this ships
+  // with for exact steps. On success this returns a real session directly, same as signIn.
+  async verifySignupOtp(email: string, token: string): Promise<{ success: boolean; user?: UserProfile; message: string }> {
+    if (!supabaseClient) {
+      return { success: false, message: "Supabase n'est pas configuré." };
+    }
+    try {
+      const { data, error } = await supabaseClient.auth.verifyOtp({ email, token, type: "signup" });
+      if (error) throw error;
+      if (!data.user) {
+        return { success: false, message: "Vérification impossible. Veuillez réessayer." };
+      }
+      const user = await fetchProfile(data.user);
+      return { success: true, user, message: "Compte vérifié avec succès !" };
+    } catch (err: any) {
+      console.error("Supabase OTP verification error:", err);
+      return { success: false, message: err.message || "Code invalide ou expiré." };
+    }
+  },
+
+  // Re-sends the signup confirmation email (and therefore a fresh OTP code) — client-side cooldown
+  // enforcement lives in the caller (App.tsx); Supabase also applies its own server-side rate limit
+  // regardless, which surfaces here as an error if the caller ignores the cooldown.
+  async resendSignupOtp(email: string): Promise<{ success: boolean; message: string }> {
+    if (!supabaseClient) {
+      return { success: false, message: "Supabase n'est pas configuré." };
+    }
+    try {
+      const { error } = await supabaseClient.auth.resend({ type: "signup", email });
+      if (error) throw error;
+      return { success: true, message: "Un nouveau code a été envoyé." };
+    } catch (err: any) {
+      console.error("Supabase OTP resend error:", err);
+      return { success: false, message: err.message || "Erreur lors du renvoi du code." };
     }
   },
 

@@ -112,6 +112,21 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
 
+  // Email OTP verification gate (Step: signup email verification). pendingOtpEmail being non-null
+  // is what switches the auth modal from the signin/signup tabs to the "enter your code" screen —
+  // set right after a fresh signup that needs confirming, or when a sign-in attempt bounces off an
+  // unconfirmed account.
+  const [pendingOtpEmail, setPendingOtpEmail] = useState<string | null>(null);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpSubmitting, setOtpSubmitting] = useState(false);
+  const [otpResendCooldown, setOtpResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (otpResendCooldown <= 0) return;
+    const timer = setTimeout(() => setOtpResendCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [otpResendCooldown]);
+
   // Intended action storage for authentication funnel
   const [pendingAction, setPendingAction] = useState<{ type: "book" | "chat" | "add_service" | "professional_profile"; provider?: ServiceProvider } | null>(null);
 
@@ -521,8 +536,9 @@ export default function App() {
 
     setAuthSubmitting(true);
     try {
+      const signupEmail = authEmail.trim();
       const res = await supabaseService.signUp({
-        email: authEmail.trim(),
+        email: signupEmail,
         password: authPassword,
         fullName: authName.trim(),
         phone: authPhone.trim() || undefined,
@@ -531,10 +547,14 @@ export default function App() {
       });
       if (!res.success) throw new Error(res.message);
 
-      if (!res.user) {
-        // Email confirmation required before a session exists yet
-        setSuccessMsg(res.message);
-        setAuthTab("signin");
+      if (res.needsVerification || !res.user) {
+        // Email OTP verification required before a session exists yet — switch the modal to the
+        // code-entry screen instead of treating this as "done".
+        setAuthPassword("");
+        setPendingOtpEmail(signupEmail);
+        setOtpResendCooldown(45);
+        setErrorMsg("");
+        setSuccessMsg("");
         return;
       }
 
@@ -585,10 +605,96 @@ export default function App() {
         executePendingAction(res.user);
       }
     } catch (err: any) {
-      setErrorMsg(err.message || (lang === "fr" ? "Email ou mot de passe incorrect." : "Incorrect email or password."));
+      const msg = String(err.message || "");
+      if (/not confirmed/i.test(msg)) {
+        // Account exists but never completed OTP verification (e.g. they closed the tab after
+        // signing up) — route them back into the code-entry screen instead of a dead-end error.
+        setPendingOtpEmail(authEmail.trim());
+        setAuthPassword("");
+        setErrorMsg(
+          lang === "fr"
+            ? "Votre e-mail n'est pas encore vérifié. Entrez le code envoyé par e-mail."
+            : "Your email isn't verified yet. Enter the code sent to your email."
+        );
+      } else {
+        setErrorMsg(msg || (lang === "fr" ? "Email ou mot de passe incorrect." : "Incorrect email or password."));
+      }
     } finally {
       setAuthSubmitting(false);
     }
+  };
+
+  // Verifies the 6-digit code emailed for signup confirmation (see supabaseService.verifySignupOtp
+  // — Supabase's auth.verifyOtp with type "signup", not a passwordless flow; email+password from
+  // handleSignUp remains the actual credential, this only confirms the address).
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingOtpEmail) return;
+    setErrorMsg("");
+    setSuccessMsg("");
+
+    if (otpCode.trim().length !== 6) {
+      setErrorMsg(lang === "fr" ? "Veuillez saisir le code à 6 chiffres." : "Please enter the 6-digit code.");
+      return;
+    }
+
+    setOtpSubmitting(true);
+    try {
+      const res = await supabaseService.verifySignupOtp(pendingOtpEmail, otpCode.trim());
+      if (!res.success || !res.user) throw new Error(res.message);
+
+      setCurrentUser(res.user);
+      setShowAuthModal(false);
+      setPendingOtpEmail(null);
+      setOtpCode("");
+
+      if (res.user.role === "admin") {
+        setActiveView("admin");
+      } else if (!res.user.onboarding_completed) {
+        // Shown onboarding flow automatically by layout
+      } else {
+        executePendingAction(res.user);
+      }
+    } catch (err: any) {
+      const msg = String(err.message || "");
+      if (/expired/i.test(msg)) {
+        setErrorMsg(lang === "fr" ? "Ce code a expiré. Demandez-en un nouveau ci-dessous." : "This code has expired. Request a new one below.");
+      } else if (/rate limit|too many/i.test(msg)) {
+        setErrorMsg(lang === "fr" ? "Trop de tentatives. Réessayez dans quelques instants." : "Too many attempts. Please try again shortly.");
+      } else {
+        setErrorMsg(lang === "fr" ? "Code incorrect. Veuillez réessayer." : "Incorrect code. Please try again.");
+      }
+    } finally {
+      setOtpSubmitting(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!pendingOtpEmail || otpResendCooldown > 0) return;
+    setErrorMsg("");
+    setSuccessMsg("");
+    try {
+      const res = await supabaseService.resendSignupOtp(pendingOtpEmail);
+      if (!res.success) throw new Error(res.message);
+      setSuccessMsg(lang === "fr" ? "Un nouveau code a été envoyé à votre e-mail." : "A new code has been sent to your email.");
+      setOtpResendCooldown(45);
+    } catch (err: any) {
+      const msg = String(err.message || "");
+      if (/rate limit|too many|seconds/i.test(msg)) {
+        setErrorMsg(lang === "fr" ? "Veuillez patienter avant de redemander un code." : "Please wait before requesting another code.");
+      } else {
+        setErrorMsg(msg || (lang === "fr" ? "Erreur lors du renvoi du code." : "Error resending code."));
+      }
+    }
+  };
+
+  const handleCancelOtp = () => {
+    setPendingOtpEmail(null);
+    setOtpCode("");
+    setOtpResendCooldown(0);
+    setErrorMsg("");
+    setSuccessMsg("");
+    setAuthTab("signin");
   };
 
   // Logout
@@ -2345,35 +2451,44 @@ export default function App() {
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 border border-amber-100 shadow-xl space-y-5 relative mx-auto my-6 sm:my-10">
             <button
-              onClick={() => { setShowAuthModal(false); setPendingAction(null); }}
+              onClick={() => {
+                setShowAuthModal(false);
+                setPendingAction(null);
+                setPendingOtpEmail(null);
+                setOtpCode("");
+                setErrorMsg("");
+                setSuccessMsg("");
+              }}
               className="absolute top-4 right-4 text-amber-800/80 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 p-2 rounded-xl transition-all cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
 
-            {/* Custom Tab selectors */}
-            <div className="flex border-b border-amber-100 pb-1">
-              <button
-                onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); }}
-                className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
-                  authTab === "signin"
-                    ? "border-[#E3A23D] text-amber-950"
-                    : "border-transparent text-amber-800/60 hover:text-amber-950"
-                }`}
-              >
-                {lang === "fr" ? "Connexion" : "Sign In"}
-              </button>
-              <button
-                onClick={() => { setAuthTab("signup"); setErrorMsg(""); setSuccessMsg(""); }}
-                className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
-                  authTab === "signup"
-                    ? "border-[#E3A23D] text-amber-950"
-                    : "border-transparent text-amber-800/60 hover:text-amber-950"
-                }`}
-              >
-                {lang === "fr" ? "S'inscrire (Nouveau)" : "Sign Up"}
-              </button>
-            </div>
+            {/* Custom Tab selectors — hidden while the OTP code-entry screen is showing */}
+            {!pendingOtpEmail && (
+              <div className="flex border-b border-amber-100 pb-1">
+                <button
+                  onClick={() => { setAuthTab("signin"); setErrorMsg(""); setSuccessMsg(""); }}
+                  className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
+                    authTab === "signin"
+                      ? "border-[#E3A23D] text-amber-950"
+                      : "border-transparent text-amber-800/60 hover:text-amber-950"
+                  }`}
+                >
+                  {lang === "fr" ? "Connexion" : "Sign In"}
+                </button>
+                <button
+                  onClick={() => { setAuthTab("signup"); setErrorMsg(""); setSuccessMsg(""); }}
+                  className={`flex-1 py-2.5 text-center text-xs font-black uppercase tracking-wider cursor-pointer border-b-2 transition-all ${
+                    authTab === "signup"
+                      ? "border-[#E3A23D] text-amber-950"
+                      : "border-transparent text-amber-800/60 hover:text-amber-950"
+                  }`}
+                >
+                  {lang === "fr" ? "S'inscrire (Nouveau)" : "Sign Up"}
+                </button>
+              </div>
+            )}
 
             {errorMsg && (
               <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3 text-xs font-bold flex items-center gap-2">
@@ -2389,7 +2504,65 @@ export default function App() {
               </div>
             )}
 
-            {authTab === "signup" ? (
+            {pendingOtpEmail ? (
+              <div className="space-y-4">
+                <div className="text-center space-y-1.5">
+                  <h3 className="text-sm font-black text-amber-950">
+                    {lang === "fr" ? "Vérifiez votre e-mail" : "Check your email"}
+                  </h3>
+                  <p className="text-xs text-amber-800 font-serif">
+                    {lang === "fr" ? "Entrez le code à 6 chiffres envoyé à " : "Enter the 6-digit code sent to "}
+                    <strong className="text-amber-950">{pendingOtpEmail}</strong>.
+                  </p>
+                </div>
+
+                <form onSubmit={handleVerifyOtp} className="space-y-4">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    autoFocus
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="000000"
+                    className="w-full text-center tracking-[0.6em] text-lg font-mono bg-[#FBF7F0] border border-amber-200 rounded-xl px-4 py-3 text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-800"
+                  />
+                  <button
+                    type="submit"
+                    disabled={otpSubmitting || otpCode.length !== 6}
+                    className="w-full py-3 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    {otpSubmitting ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle className="w-3.5 h-3.5" />
+                    )}
+                    {lang === "fr" ? "Vérifier" : "Verify"}
+                  </button>
+                </form>
+
+                <div className="flex items-center justify-between text-xs pt-1">
+                  <button
+                    type="button"
+                    onClick={handleResendOtp}
+                    disabled={otpResendCooldown > 0}
+                    className="font-bold text-amber-900 hover:text-amber-950 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {otpResendCooldown > 0
+                      ? (lang === "fr" ? `Renvoyer le code (${otpResendCooldown}s)` : `Resend code (${otpResendCooldown}s)`)
+                      : (lang === "fr" ? "Renvoyer le code" : "Resend code")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCancelOtp}
+                    className="font-bold text-amber-800/70 hover:text-amber-950 cursor-pointer"
+                  >
+                    {lang === "fr" ? "Retour" : "Back"}
+                  </button>
+                </div>
+              </div>
+            ) : authTab === "signup" ? (
               <form onSubmit={handleSignUp} className="space-y-4">
                 {/* Role selector */}
                 <div className="flex bg-amber-50 p-1 rounded-xl border border-amber-100">
