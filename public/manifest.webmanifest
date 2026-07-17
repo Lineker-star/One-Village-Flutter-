@@ -1,0 +1,26 @@
+{
+  "name": "One Village",
+  "short_name": "One Village",
+  "description": "Trouvez des prestataires de confiance à Bertoua. Find trusted service providers in Bertoua.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "lang": "fr",
+  "theme_color": "#E3A23D",
+  "background_color": "#FBF7F0",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import { SUB_CATEGORIES } from "../data/bertouaData.ts";
 import { Globe, ShieldCheck, Star, ArrowRight, Users, Briefcase } from "lucide-react";
 import brandLogo from "../assets/images/one_village_logo_1784027088635.jpg";
 import heroBg from "../assets/images/landing/hero-bg.jpg";
+import InstallAppButton from "./InstallAppButton.tsx";
 import communityFind from "../assets/images/landing/community-1.jpg";
 import communityOffer from "../assets/images/landing/community-5.jpg";
 
@@ -157,17 +158,18 @@ export default function LandingPage({ lang, setLang, onGetStarted }: LandingPage
             {t.subheadline}
           </motion.p>
 
-          <motion.div variants={fadeUp}>
+          <motion.div variants={fadeUp} className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
             <motion.button
               whileHover={{ scale: 1.045, boxShadow: "0 0 32px rgba(227,162,61,0.55)" }}
               whileTap={{ scale: 0.97 }}
               transition={{ duration: 0.15 }}
               onClick={onGetStarted}
-              className="mt-8 inline-flex items-center gap-2 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-black text-sm sm:text-base px-7 sm:px-8 py-3.5 sm:py-4 rounded-2xl shadow-lg cursor-pointer"
+              className="inline-flex items-center gap-2 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] font-black text-sm sm:text-base px-7 sm:px-8 py-3.5 sm:py-4 rounded-2xl shadow-lg cursor-pointer"
             >
               {t.ctaPrimary}
               <ArrowRight className="w-5 h-5" />
             </motion.button>
+            <InstallAppButton lang={lang} variant="hero" />
           </motion.div>
 
           <motion.p variants={fadeUp} className="mt-5 text-xs text-amber-100/70">

@@ -8,6 +8,8 @@ import { motion } from "motion/react";
 import { ServiceProvider, ServiceCategory, UserProfile } from "./types.ts";
 import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "./data/bertouaData.ts";
 import ServiceCard from "./components/ServiceCard.tsx";
+import InstallAppButton from "./components/InstallAppButton.tsx";
+import PwaUpdateBanner from "./components/PwaUpdateBanner.tsx";
 import AIGuide from "./components/AIGuide.tsx";
 import BookingModal from "./components/BookingModal.tsx";
 import ProviderWizard from "./components/ProviderWizard.tsx";
@@ -873,12 +875,18 @@ export default function App() {
   }
 
   if (showLandingPage) {
-    return <LandingPage lang={lang} setLang={setLang} onGetStarted={handleLandingGetStarted} />;
+    return (
+      <>
+        <PwaUpdateBanner lang={lang} />
+        <LandingPage lang={lang} setLang={setLang} onGetStarted={handleLandingGetStarted} />
+      </>
+    );
   }
 
   return (
     <div className="min-h-screen bg-[#FBF7F0] text-[#241611] font-sans antialiased selection:bg-[#E3A23D]/30 pb-16 overflow-x-hidden">
-      
+      <PwaUpdateBanner lang={lang} />
+
       {/* Upper Navigation Bar */}
       <header className="bg-white border-b border-amber-100/80 sticky top-0 z-40 shadow-sm backdrop-blur-md bg-white/95">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1053,6 +1061,8 @@ export default function App() {
                 </>
               )}
 
+              <InstallAppButton lang={lang} variant="compact" />
+
               <button
                 onClick={handleAppBarGetService}
                 id="btn-nav-become-provider"
@@ -1202,6 +1212,10 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <div className="pt-3 border-t border-amber-100 flex justify-center">
+              <InstallAppButton lang={lang} variant="compact" />
+            </div>
 
             <button
               onClick={() => {
