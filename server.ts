@@ -1496,6 +1496,84 @@ app.post("/api/admin/promoted-ads/:id/moderate", (req, res) => {
   res.json({ success: true, ad });
 });
 
+// --- Push Notifications (Median.co-wrapped mobile app, backed by OneSignal) ---
+// Sends via OneSignal's own REST API directly, not a Median-specific endpoint — this is exactly
+// what Median's docs point to for server-triggered sends (docs.median.co/docs/programmatic-
+// notifications). Requires ONESIGNAL_APP_ID and ONESIGNAL_REST_API_KEY as env vars (server-side
+// only — never bundled to the client; see .env.example). Targets by "external_id", which the
+// client associates via median.onesignal.login(userId) (src/lib/push.ts) — so the ids here are
+// this app's own Supabase user ids, not OneSignal-specific device/player tokens; there is no device
+// token stored anywhere in this project (see 20260726000000_push_subscribers.sql for why).
+app.post("/api/admin/push/send", async (req, res) => {
+  const { userIds, broadcast, title, body, data } = req.body as {
+    userIds?: string[];
+    broadcast?: boolean;
+    title: string;
+    body: string;
+    data?: Record<string, any>; // e.g. { activeView: "jobs" } — see src/lib/push.ts's tap handler
+  };
+
+  if (!title || !body) {
+    return res.status(400).json({ error: "title and body are required." });
+  }
+  if (!broadcast && (!userIds || userIds.length === 0)) {
+    return res.status(400).json({ error: "userIds (or broadcast: true) is required." });
+  }
+
+  const appId = process.env.ONESIGNAL_APP_ID;
+  const restApiKey = process.env.ONESIGNAL_REST_API_KEY;
+  if (!appId || !restApiKey) {
+    return res.status(503).json({ error: "Push notifications are not configured (missing ONESIGNAL_APP_ID / ONESIGNAL_REST_API_KEY)." });
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return res.status(503).json({ error: "Admin Supabase client is not configured." });
+  }
+
+  try {
+    // Only ever target ids actually known to be subscribed — sending to an arbitrary external_id
+    // that was never registered is harmless (OneSignal just won't find a match) but this keeps the
+    // response honest about who was actually reachable, and is what makes "broadcast" meaningful.
+    let query = admin.from("push_subscribers").select("user_id").eq("enabled", true);
+    if (!broadcast) query = query.in("user_id", userIds!);
+    const { data: subs, error } = await query;
+    if (error) throw error;
+    const targetIds = (subs || []).map((s: any) => s.user_id);
+
+    if (targetIds.length === 0) {
+      return res.json({ success: true, sent: 0, message: "No subscribed recipients matched." });
+    }
+
+    const oneSignalRes = await fetch("https://api.onesignal.com/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Key ${restApiKey}`,
+      },
+      body: JSON.stringify({
+        app_id: appId,
+        target_channel: "push",
+        headings: { en: title, fr: title },
+        contents: { en: body, fr: body },
+        include_aliases: { external_id: targetIds },
+        data: data || {},
+      }),
+    });
+
+    const result: any = await oneSignalRes.json();
+    if (!oneSignalRes.ok) {
+      console.error("OneSignal send failed:", result);
+      return res.status(502).json({ error: "OneSignal rejected the notification.", details: result });
+    }
+
+    res.json({ success: true, sent: targetIds.length, oneSignalId: result.id });
+  } catch (err: any) {
+    console.error("Push send error:", err);
+    res.status(500).json({ error: "Failed to send push notification.", details: err.message });
+  }
+});
+
 // Vite & Static Asset Handling
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {

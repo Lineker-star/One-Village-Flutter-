@@ -506,6 +506,26 @@ export const supabaseService = {
     await supabaseClient.auth.signOut();
   },
 
+  // Records that this user has granted push consent on a Median-wrapped device (see
+  // src/lib/push.ts and 20260726000000_push_subscribers.sql). Upsert since a user may open the app
+  // on more than one device, or re-grant consent after having previously revoked it.
+  async registerPushSubscription(userId: string): Promise<void> {
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient
+      .from("push_subscribers")
+      .upsert({ user_id: userId, enabled: true, platform: "median-android" }, { onConflict: "user_id" });
+    if (error) console.error("Failed to record push subscription:", error);
+  },
+
+  async unregisterPushSubscription(userId: string): Promise<void> {
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient
+      .from("push_subscribers")
+      .update({ enabled: false })
+      .eq("user_id", userId);
+    if (error) console.error("Failed to clear push subscription:", error);
+  },
+
   // Returns the current session's raw JWT, sent as a Bearer token to server.ts's /api/admin/* routes
   // so requireAdmin can verify it server-side instead of trusting a client-supplied role header.
   async getAccessToken(): Promise<string | null> {

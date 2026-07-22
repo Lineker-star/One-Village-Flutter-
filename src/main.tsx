@@ -1,7 +1,30 @@
-import {StrictMode} from 'react';
+import {StrictMode, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import LaunchSplash from './components/LaunchSplash.tsx';
+import OfflineBanner from './components/OfflineBanner.tsx';
+import {isMedianApp} from './lib/platform.ts';
 import './index.css';
+
+// Rendered as a true sibling of <App/> at the actual React root, not from inside App itself — App
+// has several mutually-exclusive early returns (session-check blank frame, landing page, standalone
+// public pages, the main app), and mounting the splash from within any one of those would remount
+// (and reset the timer of) a fresh LaunchSplash instance every time App switches between them during
+// the cold-boot sequence. Here its lifecycle is entirely independent of whatever App does internally.
+//
+// OfflineBanner is mounted the same way, for the same reason, and gated behind isMedianApp() per
+// the scope reminder — the desktop/browser PWA experience is unchanged by item 4's in-app UI.
+function Root() {
+  const [showSplash, setShowSplash] = useState(() => isMedianApp());
+  const isMedian = isMedianApp();
+  return (
+    <>
+      {showSplash && <LaunchSplash onComplete={() => setShowSplash(false)} />}
+      {isMedian && <OfflineBanner />}
+      <App />
+    </>
+  );
+}
 
 // Silence Vite HMR/WebSocket connection unhandled rejections and global errors in development
 if (typeof window !== 'undefined') {
@@ -138,7 +161,7 @@ if (typeof window !== 'undefined') {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Root />
   </StrictMode>,
 );
 

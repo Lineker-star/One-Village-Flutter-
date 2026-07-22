@@ -39,28 +39,93 @@ export default defineConfig(() => {
           // manualChunks) would be the real long-term fix, not attempted here since it's unrelated
           // to Google sign-in and touches build config, not this feature.
           maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
-          // CRITICAL: no runtimeCaching entries exist for this app's own /api/* routes or for the
-          // Supabase REST/Realtime domain — meaning the service worker NEVER intercepts or caches
-          // them; every request for providers, bookings, chats, job postings, etc. always goes
-          // straight to the network, exactly like it would with no service worker installed at all.
-          // The explicit NetworkOnly rules below are redundant with that default but make the
-          // guarantee self-documenting and audit-proof rather than relying on "we just didn't add a
-          // rule for it".
+          // Enables the offline fallback (item 4): navigation requests that don't match a
+          // precached asset are served the cached app shell instead of failing outright, so the
+          // SPA still boots offline for any deep-linked path (job/company/professional-profile
+          // routes included) — App.tsx's own OfflineBanner then handles the "no connectivity" UI
+          // from inside the already-loaded shell. Trade-off: an online hard-refresh/deep-link now
+          // gets the cached shell rather than a guaranteed-fresh one from the server; the existing
+          // "new version available" update-prompt banner (usePwaUpdate) is what catches this up
+          // within its hourly check rather than leaving it silently stale indefinitely.
+          navigateFallback: '/index.html',
+          // The SPA fallback must never intercept API calls — those should fail as real network
+          // errors when offline, not nonsensically resolve to the HTML shell.
+          navigateFallbackDenylist: [/^\/api\//],
+          // Workbox's generateSW already defaults clientsClaim to true when using the custom
+          // register flow this project uses (see usePwaUpdate.ts's updateServiceWorker(true), which
+          // posts SKIP_WAITING then reloads once the new worker takes control) — set explicitly
+          // here so that behavior is visible in this file rather than relying on a plugin default.
+          clientsClaim: true,
+          // CRITICAL — read this before changing anything below: dynamic data (bookings, chats,
+          // job postings, providers, professional profiles, etc.) must NEVER be served stale to an
+          // online user. NetworkFirst (not StaleWhileRevalidate) is what guarantees that: it always
+          // attempts the network FIRST and only ever falls back to the cached copy when that
+          // request genuinely fails (i.e. actually offline) — an online user never sees a cached
+          // response merely because one existed. StaleWhileRevalidate was deliberately NOT used
+          // anywhere here even though it's mentioned as an option for "read-heavy, rarely-changing
+          // data" elsewhere, because it returns the cached copy immediately (even while online) and
+          // only refreshes the cache in the background — that's exactly the kind of staleness this
+          // project's earlier PWA work explicitly ruled out. Order matters below: Workbox checks
+          // routes in registration order and uses the first match, so the narrowest
+          // exclusions (admin, auth, realtime — always NetworkOnly) are registered before the
+          // broader GET-caching rules that would otherwise also match those same URLs.
           runtimeCaching: [
             {
-              // Matched against the request's full URL by workbox, so this checks the pathname
-              // specifically rather than a string-prefix regex (which would never match an
-              // absolute "https://<host>/api/..." URL).
-              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/admin/'),
               handler: 'NetworkOnly',
             },
             {
-              urlPattern: ({ url }) => url.hostname.endsWith('.supabase.co'),
+              // Supabase Auth and Realtime share the *.supabase.co host with the REST/Storage API
+              // — excluded by path before the broader REST rule below, per the explicit
+              // "never cache Auth or Realtime traffic" requirement.
+              urlPattern: ({ url }) =>
+                url.hostname.endsWith('.supabase.co') &&
+                (url.pathname.startsWith('/auth/') || url.pathname.startsWith('/realtime/')),
+              handler: 'NetworkOnly',
+            },
+            {
+              // Supabase REST/Storage reads (providers, bookings, chats, jobs, professional
+              // profiles, uploaded files, etc.) — NetworkFirst with a short timeout (so a slow
+              // connection falls back to cache quickly rather than hanging the UI) and a short
+              // cache expiration (so the offline fallback itself can't go stale for long).
+              urlPattern: ({ url, request }) => url.hostname.endsWith('.supabase.co') && request.method === 'GET',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'supabase-rest-cache',
+                networkTimeoutSeconds: 4,
+                expiration: { maxEntries: 200, maxAgeSeconds: 5 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              // Mutations (creating a booking, sending a chat message, posting a job, uploading a
+              // file, etc.) — explicitly NetworkOnly. Workbox never caches non-GET requests by
+              // default even without a matching route, but this makes that guarantee explicit
+              // rather than implicit, matching the same reasoning as the /api/ rules below.
+              urlPattern: ({ url, request }) => url.hostname.endsWith('.supabase.co') && request.method !== 'GET',
+              handler: 'NetworkOnly',
+            },
+            {
+              // This app's own non-admin GET endpoints (providers list, promoted ads) — same
+              // NetworkFirst treatment as Supabase reads, for the same reason.
+              urlPattern: ({ url, request }) =>
+                url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/admin/') && request.method === 'GET',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'api-get-cache',
+                networkTimeoutSeconds: 4,
+                expiration: { maxEntries: 100, maxAgeSeconds: 5 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              // Non-GET /api/ routes (the AI guide proxy, promoted-ad submission, etc.) — never
+              // cached, same reasoning as the Supabase mutation rule above.
+              urlPattern: ({ url, request }) =>
+                url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/admin/') && request.method !== 'GET',
               handler: 'NetworkOnly',
             },
           ],
-          // The SPA fallback (for client-side routing) must never intercept API calls either.
-          navigateFallbackDenylist: [/^\/api\//],
         },
       }),
     ],

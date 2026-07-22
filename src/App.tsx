@@ -4,12 +4,14 @@
  */
 
 import React, { useState, useEffect, useRef } from "react";
-import { motion } from "motion/react";
+import { motion, AnimatePresence } from "motion/react";
 import { ServiceProvider, ServiceCategory, UserProfile } from "./types.ts";
 import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "./data/bertouaData.ts";
 import ServiceCard from "./components/ServiceCard.tsx";
 import InstallAppButton from "./components/InstallAppButton.tsx";
 import PwaUpdateBanner from "./components/PwaUpdateBanner.tsx";
+import { isMedianApp } from "./lib/platform.ts";
+import { requestPushPermission, loginPushUser, logoutPushUser, registerPushTapHandler } from "./lib/push.ts";
 import AIGuide from "./components/AIGuide.tsx";
 import BookingModal from "./components/BookingModal.tsx";
 import ProviderWizard from "./components/ProviderWizard.tsx";
@@ -70,6 +72,31 @@ import {
 export default function App() {
   const [lang, setLang] = useState<"fr" | "en">("fr");
   const [activeView, setActiveView] = useState<"browse" | "ads" | "jobs" | "professionals" | "dashboard" | "admin">("browse");
+
+  // Native-feeling transitions between the main tabs (Median-wrapped mobile only — see
+  // isMedianApp(); a no-op transition elsewhere leaves the desktop/browser PWA experience exactly
+  // as it was). This app has no router (activeView is a plain state switch, not a URL change), so
+  // there's no history stack to read direction from — instead, direction is inferred by comparing
+  // the new view's position in a fixed left-to-right order against the previous one, same idea as
+  // how a native tab bar knows push (forward) vs pop (back).
+  const isMedian = isMedianApp();
+  const VIEW_ORDER = ["browse", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
+  const prevViewRef = useRef(activeView);
+  const [navDirection, setNavDirection] = useState(1);
+  useEffect(() => {
+    const prevIndex = VIEW_ORDER.indexOf(prevViewRef.current);
+    const nextIndex = VIEW_ORDER.indexOf(activeView);
+    setNavDirection(nextIndex >= prevIndex ? 1 : -1);
+    prevViewRef.current = activeView;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView]);
+  const viewTransitionVariants = isMedian
+    ? {
+        enter: (direction: number) => ({ opacity: 0, x: direction > 0 ? 28 : -28 }),
+        center: { opacity: 1, x: 0 },
+        exit: (direction: number) => ({ opacity: 0, x: direction > 0 ? -28 : 28 }),
+      }
+    : { enter: {}, center: {}, exit: {} };
 
   // Public professional-profile route: a plain "/pro/<userId>" path check, not a full router (this
   // app has none) — computed once from the URL at first render. See the early return further down
@@ -307,6 +334,37 @@ export default function App() {
       active = false;
       unsubscribe();
     };
+  }, []);
+
+  // Median push notifications (mobile/Median-wrapped context only — no-ops entirely elsewhere,
+  // see isMedianApp()). Associating the device with the user id happens as soon as we know who
+  // they are (silent, no native prompt); the actual OS permission prompt waits until onboarding is
+  // complete, matching "request at an appropriate point, not immediately on cold start" rather than
+  // firing it the instant a brand-new signup lands.
+  useEffect(() => {
+    if (!isMedianApp() || !currentUser) return;
+    loginPushUser(currentUser.id);
+    if (currentUser.onboarding_completed) {
+      requestPushPermission();
+      supabaseService.registerPushSubscription(currentUser.id);
+    }
+  }, [currentUser?.id, currentUser?.onboarding_completed]);
+
+  // Notification-tap deep-linking (see src/lib/push.ts + server.ts's /api/admin/push/send, which
+  // attaches this same "activeView" key to the notification's data payload). Registered once,
+  // unconditionally — registerPushTapHandler itself no-ops outside the Median wrapper.
+  useEffect(() => {
+    registerPushTapHandler((data) => {
+      const validViews = ["browse", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
+      if (typeof data.activeView === "string" && (validViews as readonly string[]).includes(data.activeView)) {
+        setShowLandingPage(false);
+        setActiveView(data.activeView as typeof validViews[number]);
+      } else if (typeof data.path === "string") {
+        // One of the standalone pathname-routed pages (job/company/professional profile) — a real
+        // navigation, not an activeView switch, so a full load is correct here.
+        window.location.href = data.path;
+      }
+    });
   }, []);
 
   const t = {
@@ -744,6 +802,7 @@ export default function App() {
 
   // Logout
   const handleLogout = async () => {
+    logoutPushUser();
     await supabaseService.signOut();
     setCurrentUser(null);
     setActiveView("browse");
@@ -1461,7 +1520,16 @@ export default function App() {
             />
           </div>
         ) : (
-          <>
+          <AnimatePresence mode="wait" custom={navDirection} initial={false}>
+            <motion.div
+              key={activeView}
+              custom={navDirection}
+              variants={viewTransitionVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ duration: isMedian ? 0.22 : 0, ease: "easeOut" }}
+            >
             {/* VIEW 1: BROWSE DIRECTORY */}
             {activeView === "browse" && (
               <div className="space-y-8 animate-fade-in" id="search-listings-container">
@@ -2494,7 +2562,8 @@ export default function App() {
                 />
               </div>
             )}
-          </>
+            </motion.div>
+          </AnimatePresence>
         )}
       </main>
 
