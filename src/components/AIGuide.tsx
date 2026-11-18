@@ -3,25 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import brandLogo from "../assets/images/one_village_logo_1784027088635.jpg";
-import { 
-  Sparkles, 
-  MessageSquare, 
-  Languages, 
-  FileText, 
-  Landmark, 
-  Send, 
-  Loader2, 
-  Volume2, 
-  VolumeX, 
-  Globe, 
-  Mic, 
-  MicOff, 
-  Video, 
-  VideoOff, 
-  Play, 
-  HelpCircle 
+import {
+  Sparkles,
+  MessageSquare,
+  Languages,
+  FileText,
+  Landmark,
+  Send,
+  Loader2,
+  Volume2,
+  VolumeX,
+  Globe,
+  Mic,
+  MicOff,
+  Video,
+  VideoOff,
+  Play,
+  HelpCircle,
+  AlertTriangle,
 } from "lucide-react";
 
 interface AIGuideProps {
@@ -45,6 +46,34 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
   const [response, setResponse] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
+
+  // AI availability banner: the server returns a specific 503 body when GEMINI_API_KEY is not set,
+  // and the first request of every session used to just silently fall back to the generic error
+  // string ("Une erreur est survenue."). We now probe once on mount and keep a stable flag so the
+  // UI can show an explicit "AI unavailable — running in offline phrasebook mode" banner instead
+  // of letting the user type and wonder why nothing ever comes back.
+  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ai-guide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "ping", task: "chat" }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        // The route returns { error: "..." } with a 503 when the key is missing; any other shape
+        // (including a real answer) means the service is live.
+        setAiAvailable(!data?.error);
+      })
+      .catch(() => {
+        if (!cancelled) setAiAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Speech Recognition & Synthesis States (Phase 8 - Stage B)
   const [isListening, setIsListening] = useState(false);
@@ -247,6 +276,30 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
 
   return (
     <div id="ai-guide-widget" className="bg-white/55 border border-[#E3A23D]/25 rounded-2xl p-6 shadow-xl overflow-hidden backdrop-blur-md">
+      {/* AI availability banner: replaces the old silent failure where users typed, got no
+          answer, and were left wondering why. Shown until the probe resolves, then only while
+          the service is actually down. The offline phrasebook below still works without it. */}
+      {aiAvailable === false && (
+        <div className="mb-5 flex items-start gap-3 bg-amber-50 border border-amber-300 text-amber-900 text-sm rounded-xl px-4 py-3">
+          <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-bold">
+              {lang === "fr" ? "IA temporairement hors ligne" : "AI temporarily offline"}
+            </p>
+            <p className="text-amber-800/80">
+              {lang === "fr"
+                ? "Le service de génération IA n'est pas configuré sur ce serveur (GEMINI_API_KEY manquant). Vous pouvez quand même utiliser le traducteur de phrases locales ci-dessous."
+                : "The AI generation service is not configured on this server (missing GEMINI_API_KEY). You can still use the local phrase translator below."}
+            </p>
+          </div>
+        </div>
+      )}
+      {aiAvailable === null && (
+        <div className="mb-5 flex items-center gap-2 text-xs text-amber-700/70">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          {lang === "fr" ? "Vérification de la disponibilité de l'IA..." : "Checking AI availability..."}
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 rounded-full bg-amber-600 overflow-hidden shrink-0 shadow-sm border border-amber-500">

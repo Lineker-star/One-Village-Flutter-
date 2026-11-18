@@ -259,6 +259,86 @@ export default function App() {
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, []);
 
+  // --- SEO / link-preview meta injection -----------------------------------------------
+  // This app has no router (activeView is a plain state switch), so search engines and social
+  // previews previously always saw the static <title>One Village</title> and the placeholder
+  // og:* URLs baked into index.html — the SPA shell is identical for every path. This hook
+  // rewrites the document's <title>, meta description and Open Graph / Twitter tags in place
+  // whenever the rendered route changes, so deep links (/pro/<id>, /company/<id>, /job/<id>)
+  // carry real, meaningful metadata instead of a blank shell. It is a no-op on the server (no
+  // document object), so SSR is unaffected; the tags are simply absent until the SPA hydrates.
+  const APP_DOMAIN = "https://www.onevillage.site";
+  const SEO_DEFAULTS = {
+    title: "One Village",
+    description:
+      "Trouvez des prestataires de confiance a Bertoua. Find trusted service providers in Bertoua.",
+    image: `${APP_DOMAIN}/og-image.jpg`,
+  };
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let title = SEO_DEFAULTS.title;
+    let description = SEO_DEFAULTS.description;
+    let image = SEO_DEFAULTS.image;
+    let url = `${APP_DOMAIN}${window.location.pathname}${window.location.search}`;
+
+    if (proProfileUserId) {
+      title = "Profil professionnel - One Village";
+      description =
+        "Consultez le profil professionnel sur One Village, la marketplace de prestataires a Bertoua.";
+    } else if (companyPageId) {
+      title = "Entreprise - One Village";
+      description =
+        "Decouvrez l'entreprise et ses services sur One Village, Bertoua.";
+    } else if (jobPageId) {
+      title = "Offre d'emploi - One Village";
+      description =
+        "Consultez cette offre d'emploi et postulez via One Village, Bertoua.";
+    } else if (activeView === "ads") {
+      title = "Annonces - One Village";
+      description =
+        "Parcourez les petites announcements et offres promotionnelles de la communaute de Bertoua.";
+    } else if (activeView === "jobs") {
+      title = "Emplois - One Village";
+      description =
+        "Trouvez les dernieres offres d'emploi ouvertes a Bertoua et postulez en ligne.";
+    } else if (activeView === "professionals") {
+      title = "Professionnels - One Village";
+      description =
+        "Annuaire des prestataires et professionnels de confiance a Bertoua.";
+    } else if (activeView === "dashboard") {
+      title = "Tableau de bord - One Village";
+      description =
+        "Gerez vos reservations, conversations et profil sur One Village.";
+    } else if (activeView === "admin") {
+      title = "Administration - One Village";
+      description = "Panneau d'administration One Village.";
+    }
+
+    const setTag = (selector: string, attr: string, value: string) => {
+      let el = document.querySelector(selector) as HTMLElement | null;
+      if (!el) {
+        el = document.createElement("meta");
+        if (selector.startsWith("meta[name=")) {
+          el.setAttribute("name", selector.slice(11, -2));
+        } else if (selector.startsWith("meta[property=")) {
+          el.setAttribute("property", selector.slice(16, -2));
+        }
+        document.head.appendChild(el);
+      }
+      el.setAttribute(attr, value);
+    };
+
+    document.title = title;
+    setTag('meta[name="description"]', "content", description);
+    setTag('meta[property="og:title"]', "content", title);
+    setTag('meta[property="og:description"]', "content", description);
+    setTag('meta[property="og:image"]', "content", image);
+    setTag('meta[property="og:url"]', "content", url);
+    setTag('meta[name="twitter:title"]', "content", title);
+    setTag('meta[name="twitter:description"]', "content", description);
+    setTag('meta[name="twitter:image"]', "content", image);
+  }, [proProfileUserId, companyPageId, jobPageId, activeView]);
+
   // Compact view: lets logged-in users (any role) collapse the marketing/discovery sections
   // (nav browse/ads tabs, promoted ads carousel, Discovery Dashboard trending blocks) so their own
   // account content is front and center. Persisted across sessions; irrelevant while logged out.

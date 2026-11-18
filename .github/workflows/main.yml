@@ -1,1 +1,83 @@
+name: Build & Deploy
 
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Web build + smoke test (runs on every push/PR to main).
+  # Render's own auto-deploy does the actual production deploy; this job is the
+  # gate that keeps broken commits from ever reaching the live service.
+  # ---------------------------------------------------------------------------
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npm run lint
+
+      - name: Production build (vite + esbuild server bundle)
+        run: npm run build
+        env:
+          # Public keys are safe to bake into the CI image — they are read by the
+          # client via import.meta.env in src/lib/supabase.ts.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Smoke-test the built server bundle
+        run: |
+          set -e
+          # NODE_ENV=production skips the Vite dev middleware (server.ts:1579) and serves
+          # the static dist/ instead — exactly what the Docker image / Render runtime does.
+          NODE_ENV=PORT=3099 node -e "
+            const http = require('http');
+            const cp = require('child_process');
+            const server = cp.spawn('node', ['dist/server.cjs'], {
+              env: { ...process.env, NODE_ENV: 'production', PORT: '3099' },
+              stdio: 'pipe',
+            });
+            let done = false;
+            const timer = setTimeout(() => {
+              console.error('Server failed to become ready in 15s');
+              server.kill();
+              process.exit(1);
+            }, 15000);
+            server.stdout.on('data', d => {
+              process.stdout.write('[server] ' + d.toString());
+              if (d.toString().includes('Server listening on port 3099') && !done) {
+                done = true;
+                http.get('http://localhost:3099/api/health', res => {
+                  let body = '';
+                  res.on('data', c => body += c);
+                  res.on('end', () => {
+                    console.log('GET /api/health ->', res.statusCode, body.trim());
+                    if (res.statusCode !== 200 || !body.includes('ok')) {
+                      console.error('Health check failed');
+                      process.exit(1);
+                    }
+                    server.kill();
+                    process.exit(0);
+                  });
+                }).on('error', e => { console.error(e); process.exit(1); });
+              }
+            });
+            server.stderr.on('data', d => process.stderr.write('[server-err] ' + d.toString()));
+            server.on('exit', code => {
+              clearTimeout(timer);
+              if (!done) process.exit(code || 0);
+            });
+          "
