@@ -16,6 +16,8 @@ import {
   Phone,
   MessageCircle,
   AlertTriangle,
+  Camera,
+  Upload,
 } from "lucide-react";
 import { CATEGORY_DETAILS } from "../data/bertouaData.ts";
 
@@ -33,9 +35,13 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
-  const [showImageComingSoon, setShowImageComingSoon] = useState(false);
+  const [showImagePicker, setShowImagePicker] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const cat = CATEGORY_DETAILS[provider.category];
 
@@ -48,6 +54,8 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
       loadingHistory: "Chargement de la discussion...",
       noMessages: "Aucun message pour le moment. Dites bonjour !",
       imageComingSoon: "L'envoi de photos arrive bientôt.",
+      imageTypeError: "Veuillez sélectionner une image (PNG, JPG, WebP).",
+      imageTooBig: "L'image dépasse 5 Mo. Veuillez la compresser.",
       openError: "Impossible d'ouvrir la discussion. Réessayez plus tard.",
       sendError: "Échec de l'envoi du message.",
     },
@@ -59,6 +67,8 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
       loadingHistory: "Loading the conversation...",
       noMessages: "No messages yet. Say hello!",
       imageComingSoon: "Sending photos is coming soon.",
+      imageTypeError: "Please select an image file (PNG, JPG, WebP).",
+      imageTooBig: "Image exceeds 5 MB. Please compress it.",
       openError: "Couldn't open the chat. Please try again later.",
       sendError: "Failed to send the message.",
     }
@@ -115,7 +125,7 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSendMessage = async (e: React.FormEvent) => {
+const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputText.trim();
     if (!text || sending || !chatId) return;
@@ -135,9 +145,61 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
     }
   };
 
-  const handleImageButtonClick = () => {
-    setShowImageComingSoon(true);
-    setTimeout(() => setShowImageComingSoon(false), 2500);
+  // Image attachment: previously this button was a no-op toast ("coming soon"). The schema
+  // (chat_messages.message_type chat_message_type, media_url TEXT) already supported image
+  // messages from day one — the client just never wired it up. We now upload to the
+  // chat-images Supabase Storage bucket and insert a real 'image' message row.
+  const handleImagePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Client-side guard: reject anything that isn't an image, and cap at 5 MB to keep the
+    // storage bucket from filling up with accidental large uploads.
+    if (!file.type.startsWith("image/")) {
+      setErrorMsg(t.imageTypeError);
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMsg(t.imageTooBig);
+      return;
+    }
+    setSelectedImage(file);
+    const reader = new FileReader();
+    reader.onload = () => setImagePreview(reader.result as string);
+    reader.readAsDataURL(file);
+    setShowImagePicker(true);
+  };
+
+  const handleCancelImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setShowImagePicker(false);
+  };
+
+  const handleSendImage = async () => {
+    if (!selectedImage || !chatId || uploadingImage) return;
+    setUploadingImage(true);
+    setErrorMsg("");
+    try {
+      const url = await supabaseService.uploadChatImage(
+        chatId,
+        currentUser.id,
+        selectedImage
+      );
+      await supabaseService.sendChatMessage(
+        chatId,
+        currentUser.id,
+        "", // empty text — the image is the message
+        url,
+        "image"
+      );
+      handleCancelImage();
+    } catch (err) {
+      console.error("Failed to send image:", err);
+      setErrorMsg(t.sendError);
+    } finally {
+      setUploadingImage(false);
+    }
   };
 
   return (
@@ -228,7 +290,16 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
                       : "bg-white text-amber-950 rounded-tl-none border border-amber-100"
                   }`}
                 >
-                  <p className="font-sans whitespace-pre-line text-xs font-medium leading-relaxed">{msg.text}</p>
+                  {msg.imageUrl ? (
+                    <img
+                      src={msg.imageUrl}
+                      alt="Message image"
+                      className="max-w-[220px] max-h-[280px] rounded-lg object-cover cursor-zoom-in"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <p className="font-sans whitespace-pre-line text-xs font-medium leading-relaxed">{msg.text}</p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1.5 mt-1 px-1 text-[9px] text-amber-800/60 font-mono">
@@ -248,22 +319,58 @@ export default function ChatInterface({ provider, currentUser, lang, onBack }: C
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Image "coming soon" transient notice */}
-      {showImageComingSoon && (
-        <div className="px-4 py-2 border-t border-amber-100 bg-amber-50/70 flex items-center gap-2 text-[11px] text-amber-800 shrink-0 animate-fade-in">
-          <Image className="w-3.5 h-3.5 shrink-0" />
-          <span>{t.imageComingSoon}</span>
+{/* Image "coming soon" transient notice — removed */}
+      {/* Image picker overlay */}
+      {showImagePicker && imagePreview && (
+        <div className="px-4 py-3 border-t border-amber-100 bg-white flex items-center gap-3 shrink-0 animate-fade-in">
+          <img
+            src={imagePreview}
+            alt="Preview"
+            className="w-12 h-12 rounded-lg object-cover border border-amber-200"
+          />
+          <span className="flex-1 text-xs text-amber-800 truncate">{selectedImage?.name}</span>
+          <button
+            type="button"
+            onClick={handleCancelImage}
+            className="p-1.5 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors cursor-pointer"
+            title="Annuler / Cancel"
+          >
+            <X className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handleSendImage}
+            disabled={uploadingImage}
+            className="p-2 bg-amber-800 hover:bg-amber-900 disabled:opacity-40 text-white rounded-lg transition-all cursor-pointer shadow-sm flex items-center gap-1.5 text-xs font-bold"
+          >
+            {uploadingImage ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Send className="w-3.5 h-3.5" />
+            )}
+            {uploadingImage ? "..." : "Envoyer / Send"}
+          </button>
         </div>
       )}
 
       {/* Input bar controls */}
       <form onSubmit={handleSendMessage} className="p-3.5 border-t border-amber-100 flex items-center gap-2.5 bg-white shrink-0">
-        {/* Attachment image button — visibly present but disabled ("coming soon"), not wired to a real upload */}
+        {/* Hidden file input */}
+        <input
+          type="file"
+          accept="image/*"
+          ref={fileInputRef}
+          onChange={handleImagePick}
+          className="hidden"
+        />
+
+        {/* Attachment image button */}
         <button
           type="button"
-          onClick={handleImageButtonClick}
-          className="p-3 bg-amber-50/60 text-amber-900/40 rounded-xl transition-colors cursor-not-allowed border border-amber-200/30 flex items-center justify-center shadow-xs"
-          title={t.imageComingSoon}
+          onClick={() => fileInputRef.current?.click()}
+          disabled={loadingHistory}
+          className="p-3 bg-amber-50 hover:bg-amber-100 text-amber-900/70 hover:text-amber-900 rounded-xl transition-colors border border-amber-200/30 flex items-center justify-center shadow-xs disabled:opacity-40"
+          title="Joindre une image / Attach image"
         >
           <Image className="w-4.5 h-4.5" />
         </button>

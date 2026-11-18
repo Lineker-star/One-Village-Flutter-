@@ -2724,17 +2724,40 @@ export const supabaseService = {
     return (data || []).map((row: any) => mapChatMessageRow(row, viewerId));
   },
 
-  // Text messages only for this pass — image/voice message_type values exist in the schema for
-  // future use but nothing sends them yet (see ChatInterface.tsx).
-  async sendChatMessage(chatId: string, senderId: string, content: string): Promise<void> {
+  // Sends a chat message. By default a text message; pass imageUrl + "image" to send an
+  // image message (ChatInterface.tsx). The schema (chat_messages.message_type,
+  // chat_messages.media_url) already supports image messages — this simply wires them up.
+  async sendChatMessage(
+    chatId: string,
+    senderId: string,
+    content: string,
+    mediaUrl?: string,
+    messageType: "text" | "image" = "text"
+  ): Promise<void> {
     if (!supabaseClient) throw new Error("Supabase n'est pas configuré.");
     const { error } = await supabaseClient.from("chat_messages").insert({
       chat_id: chatId,
       sender_id: senderId,
-      message_type: "text",
-      content,
+      message_type: messageType,
+      content: content || (messageType === "image" ? "" : content),
+      ...(mediaUrl ? { media_url: mediaUrl } : {}),
     });
     if (error) throw error;
+  },
+
+  // Uploads an image to the chat-images Supabase Storage bucket and returns its public URL.
+  // The bucket is created by the migration (20260730000000_chat_images_bucket.sql); RLS on it
+  // allows any authenticated participant of the chat to upload.
+  async uploadChatImage(chatId: string, senderId: string, file: File): Promise<string> {
+    if (!supabaseClient) throw new Error("Supabase n'est pas configuré.");
+    const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+    const path = `${chatId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error } = await supabaseClient.storage
+      .from("chat-images")
+      .upload(path, file, { contentType: file.type, upsert: false });
+    if (error) throw error;
+    const { data } = supabaseClient.storage.from("chat-images").getPublicUrl(path);
+    return data.publicUrl;
   },
 
   // Subscribes to new messages in a chat thread via Supabase Realtime (requires chat_messages to
