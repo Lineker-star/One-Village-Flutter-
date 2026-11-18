@@ -131,6 +131,8 @@ export interface Booking {
   paymentMethod?: PaymentMethod;
   paymentPhone?: string;
   momoTransactionId?: string;
+  providerCompleted?: boolean;
+  clientCompleted?: boolean;
   createdAt: string;
 }
 

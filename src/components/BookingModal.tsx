@@ -6,7 +6,7 @@
 import React, { useState } from "react";
 import { ServiceProvider, UserProfile, RealPaymentMethod } from "../types.ts";
 import { supabaseService } from "../lib/supabase.ts";
-import { Calendar, Clock, DollarSign, X, CheckCircle, ShieldAlert, Loader2, ArrowRight, Info } from "lucide-react";
+import { Calendar, Clock, DollarSign, X, CheckCircle, ShieldAlert, Loader2, ArrowRight, Info, Phone, CheckCircle2, AlertCircle } from "lucide-react";
 
 interface BookingModalProps {
   provider: ServiceProvider;
@@ -31,6 +31,11 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [createdBookingId, setCreatedBookingId] = useState("");
+  // Payment phone state — the phone number the user enters for MoMo. For now it's stored
+  // locally and passed to createBooking; a future server-side MoMo API would use it to trigger
+  // the USSD push.
+  const [paymentPhone, setPaymentPhone] = useState("");
+  const [paymentPhoneValid, setPaymentPhoneValid] = useState(false);
 
   const t = {
     fr: {
@@ -43,12 +48,24 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
       momoTitle: "Paiement Mobile Money",
       momoSubtitle: "Sélectionnez votre opérateur préféré",
       confirmBookingBtn: "Confirmer la réservation",
-      momoComingSoon: "Le paiement Mobile Money en direct arrive bientôt. Pour le moment, cette réservation sera confirmée manuellement entre vous et le prestataire, comme un paiement en espèces.",
       cancel: "Annuler",
       successTitle: "Demande envoyée !",
       successSubtitle: "Votre demande de réservation a été transmise au prestataire.",
       receiptInfo: "Le prestataire doit accepter votre demande. Vous pouvez suivre son statut et discuter avec lui depuis votre tableau de bord.",
       bookAsLabel: "Réservation au nom de",
+      phoneLabel: "Numéro Mobile Money",
+      phonePlaceholder: "Ex: 6XXXXXXXX",
+      phoneHint: "Vous recevrez une demande de paiement sur ce numéro.",
+      invalidPhone: "Veuillez entrer un numéro de téléphone camerounais valide (9 chiffres).",
+      paymentStep: "Étape de paiement",
+      paymentStepDesc: "Choisissez comment vous souhaitez payer ce service.",
+      payWithMomo: "Payer avec Mobile Money",
+      payWithCash: "Payer en espèces",
+      selectOperator: "Sélectionnez votre opérateur",
+      enterPhone: "Entrez votre numéro",
+      confirmPayment: "Confirmer et réserver",
+      back: "Retour",
+      phoneRequired: "Veuillez entrer votre numéro Mobile Money pour continuer.",
     },
     en: {
       title: "Book a service",
@@ -60,17 +77,38 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
       momoTitle: "Mobile Money Payment",
       momoSubtitle: "Select your preferred operator",
       confirmBookingBtn: "Confirm Booking",
-      momoComingSoon: "Live Mobile Money payment is coming soon. For now, this booking will be confirmed manually between you and the provider, just like a cash payment.",
       cancel: "Cancel",
       successTitle: "Request sent!",
       successSubtitle: "Your booking request has been sent to the provider.",
       receiptInfo: "The provider needs to accept your request. You can track its status and chat with them from your dashboard.",
       bookAsLabel: "Booking as",
+      phoneLabel: "Mobile Money Number",
+      phonePlaceholder: "e.g. 6XXXXXXXX",
+      phoneHint: "You will receive a payment request on this number.",
+      invalidPhone: "Please enter a valid Cameroon phone number (9 digits).",
+      paymentStep: "Payment step",
+      paymentStepDesc: "Choose how you want to pay for this service.",
+      payWithMomo: "Pay with Mobile Money",
+      payWithCash: "Pay in cash",
+      selectOperator: "Select your operator",
+      enterPhone: "Enter your number",
+      confirmPayment: "Confirm and book",
+      back: "Back",
+      phoneRequired: "Please enter your Mobile Money number to continue.",
     }
   }[lang];
 
   const isProviderBookable = provider.verified || provider.status === "approved";
   const isSelfBooking = currentUser.id === provider.id;
+
+  // Validate Cameroon phone: 9 digits, starts with 6 (MTN/Orange/Camtel mobile prefix).
+  const handlePhoneChange = (value: string) => {
+    const digits = value.replace(/\D/g, "");
+    setPaymentPhone(digits);
+    // Cameroon mobile numbers: 9 digits starting with 6 (6XX XX XX XX)
+    const isValid = digits.length === 9 && digits.startsWith("6");
+    setPaymentPhoneValid(isValid);
+  };
 
   const handleDetailsSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -208,19 +246,15 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
           </form>
         )}
 
-        {/* Step 2: Payment method selection */}
+        {/* Step 2: Payment method selection + phone entry */}
         {step === "pay" && (
           <div className="p-6 space-y-5">
             <div>
               <h3 className="text-lg font-bold text-amber-950 flex items-center gap-1.5">
                 <DollarSign className="w-5 h-5 text-amber-800" />
-                {operator === "cash" ? (lang === "fr" ? "Paiement en Espèces" : "Cash on Service") : t.momoTitle}
+                {t.paymentStep}
               </h3>
-              <p className="text-xs text-amber-800 mt-1">
-                {operator === "cash"
-                  ? (lang === "fr" ? "Réglez directement le prestataire après la fin du travail" : "Pay the provider directly after completion")
-                  : t.momoSubtitle}
-              </p>
+              <p className="text-xs text-amber-800 mt-1">{t.paymentStepDesc}</p>
             </div>
 
             {errorMsg && (
@@ -230,95 +264,124 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
               </div>
             )}
 
-            <div className="space-y-4">
-              {/* Operator Cards */}
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setOperator("mtn")}
-                  className={`relative p-3 rounded-xl border flex flex-col items-center gap-2 cursor-pointer transition-all ${
-                    operator === "mtn"
-                      ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
-                      : "border-amber-200 bg-white hover:bg-amber-50/20"
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-[#FFCC00] flex items-center justify-center font-black text-black text-xs shadow-inner">
-                    MTN
-                  </div>
-                  <span className="text-[10px] font-bold text-amber-950">MoMo</span>
-                  {operator === "mtn" && (
-                    <div className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-600" />
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setOperator("orange")}
-                  className={`relative p-3 rounded-xl border flex flex-col items-center gap-2 cursor-pointer transition-all ${
-                    operator === "orange"
-                      ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
-                      : "border-amber-200 bg-white hover:bg-amber-50/20"
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-[#FF6600] flex items-center justify-center font-bold text-white text-[9px] shadow-inner">
-                    OM
-                  </div>
-                  <span className="text-[10px] font-bold text-amber-950">Orange</span>
-                  {operator === "orange" && (
-                    <div className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-600" />
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setOperator("cash")}
-                  className={`relative p-3 rounded-xl border flex flex-col items-center gap-2 cursor-pointer transition-all ${
-                    operator === "cash"
-                      ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
-                      : "border-amber-200 bg-white hover:bg-amber-50/20"
-                  }`}
-                >
-                  <div className="w-10 h-10 rounded-full bg-emerald-600 flex items-center justify-center font-bold text-white text-base shadow-inner">
-                    💵
-                  </div>
-                  <span className="text-[10px] font-bold text-amber-950">{lang === "fr" ? "Espèces" : "Cash"}</span>
-                  {operator === "cash" && (
-                    <div className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-600" />
-                  )}
-                </button>
-              </div>
-
-              {operator !== "cash" ? (
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex items-start gap-2.5">
-                  <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <span className="text-[11px] text-amber-800 leading-relaxed">{t.momoComingSoon}</span>
+            {/* Payment method tabs */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setOperator("mtn")}
+                className={`p-4 rounded-xl border flex flex-col items-center gap-2 cursor-pointer transition-all ${
+                  operator === "mtn" || operator === "orange"
+                    ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
+                    : "border-amber-200 bg-white hover:bg-amber-50/20"
+                }`}
+              >
+                <div className="w-12 h-12 rounded-full bg-[#FFCC00] flex items-center justify-center font-black text-black text-sm shadow-inner">
+                  MoMo
                 </div>
-              ) : (
-                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-2.5">
-                  <span className="text-lg shrink-0">🤝</span>
-                  <p className="text-[11px] text-emerald-950 leading-relaxed font-sans">
-                    {lang === "fr"
-                      ? "Vous payerez directement le prestataire en espèces (FCFA) une fois le travail accompli. L'accord sera enregistré en toute confiance."
-                      : "You will pay the provider directly in cash (FCFA) once the job is completed. The deal will be securely registered."}
-                  </p>
+                <span className="text-[11px] font-bold text-amber-950">{t.payWithMomo}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setOperator("cash")}
+                className={`p-4 rounded-xl border flex flex-col items-center gap-2 cursor-pointer transition-all ${
+                  operator === "cash"
+                    ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
+                    : "border-amber-200 bg-white hover:bg-amber-50/20"
+                }`}
+              >
+                <div className="w-12 h-12 rounded-full bg-emerald-600 flex items-center justify-center font-bold text-white text-xl shadow-inner">
+                  💵
                 </div>
-              )}
+                <span className="text-[11px] font-bold text-amber-950">{t.payWithCash}</span>
+              </button>
             </div>
+
+            {/* MoMo details: operator choice + phone */}
+            {(operator === "mtn" || operator === "orange") && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-amber-900 mb-2">{t.selectOperator}</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOperator("mtn")}
+                      className={`p-3 rounded-xl border flex items-center gap-2.5 cursor-pointer transition-all ${
+                        operator === "mtn"
+                          ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
+                          : "border-amber-200 bg-white hover:bg-amber-50/20"
+                      }`}
+                    >
+                      <div className="w-8 h-8 rounded-full bg-[#FFCC00] flex items-center justify-center font-black text-black text-[10px] shadow-inner">
+                        MTN
+                      </div>
+                      <span className="text-[11px] font-bold text-amber-950">MTN MoMo</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOperator("orange")}
+                      className={`p-3 rounded-xl border flex items-center gap-2.5 cursor-pointer transition-all ${
+                        operator === "orange"
+                          ? "border-amber-500 bg-amber-50 ring-2 ring-amber-500/20"
+                          : "border-amber-200 bg-white hover:bg-amber-50/20"
+                      }`}
+                    >
+                      <div className="w-8 h-8 rounded-full bg-[#FF6600] flex items-center justify-center font-bold text-white text-[9px] shadow-inner">
+                        OM
+                      </div>
+                      <span className="text-[11px] font-bold text-amber-950">Orange Money</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-amber-900 mb-1 flex items-center gap-1">
+                    <Phone className="w-3 h-3" /> {t.enterPhone}
+                  </label>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    placeholder={t.phonePlaceholder}
+                    value={paymentPhone}
+                    onChange={(e) => handlePhoneChange(e.target.value)}
+                    className={`w-full border rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:border-transparent ${
+                      paymentPhone && !paymentPhoneValid
+                        ? "border-red-300 bg-red-50 text-red-900"
+                        : paymentPhoneValid
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-950"
+                          : "border-amber-200 bg-amber-50/50 text-amber-950"
+                    } focus:ring-amber-600`}
+                  />
+                  <p className="text-[10px] text-amber-800 mt-1.5">{t.phoneHint}</p>
+                </div>
+              </div>
+            )}
+
+            {operator === "cash" && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-2.5">
+                <span className="text-lg shrink-0">🤝</span>
+                <p className="text-[11px] text-emerald-950 leading-relaxed font-sans">
+                  {lang === "fr"
+                    ? "Vous payerez directement le prestataire en espèces (FCFA) une fois le travail accompli. L'accord sera enregistré en toute confiance."
+                    : "You will pay the provider directly in cash (FCFA) once the job is completed. The deal will be securely registered."}
+                </p>
+              </div>
+            )}
 
             <div className="flex gap-2 pt-2">
               <button
                 onClick={() => setStep("details")}
                 className="flex-1 py-3 border border-amber-200 text-amber-900 hover:bg-amber-50 font-medium rounded-xl text-sm transition-colors cursor-pointer"
               >
-                Retour
+                {t.back}
               </button>
               <button
                 onClick={handleConfirmBooking}
-                disabled={loading}
+                disabled={loading || ((operator === "mtn" || operator === "orange") && !paymentPhoneValid)}
                 id="btn-initiate-momo"
                 className="flex-1 bg-amber-800 hover:bg-amber-900 disabled:opacity-50 text-white font-medium rounded-xl text-sm py-3 transition-colors shadow-sm cursor-pointer flex items-center justify-center gap-1.5"
               >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : t.confirmBookingBtn}
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : t.confirmPayment}
               </button>
             </div>
           </div>
@@ -346,6 +409,12 @@ export default function BookingModal({ provider, currentUser, lang, onClose, onB
               <div className="flex justify-between">
                 <span className="text-amber-800">Date prévue :</span>
                 <span className="font-bold text-amber-950">{serviceDate} ({serviceTime})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-amber-800">Mode de paiement :</span>
+                <span className="font-bold text-amber-950">
+                  {operator === "cash" ? "💵 Espèces" : `📱 ${operator === "mtn" ? "MTN MoMo" : "Orange Money"} (${paymentPhone})`}
+                </span>
               </div>
               <div className="flex justify-between pt-1.5 border-t border-amber-100/50">
                 <span className="text-amber-800">Réf. réservation :</span>

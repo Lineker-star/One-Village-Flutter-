@@ -307,8 +307,8 @@ const handleSendMessage = async (e: React.FormEvent) => {
                     {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   </span>
                   {isMine && (
-                    <span className="flex items-center text-amber-800/40">
-                      <Check className="w-3.5 h-3.5" title="Envoyé / Sent" />
+                    <span className="flex items-center text-amber-800/40" title="Envoyé / Sent">
+                      <Check className="w-3.5 h-3.5" />
                     </span>
                   )}
                 </div>

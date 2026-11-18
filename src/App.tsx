@@ -31,6 +31,7 @@ import JobDetailPage from "./components/JobDetailPage.tsx";
 import ProfessionalDirectoryPage from "./components/ProfessionalDirectoryPage.tsx";
 import { supabaseService } from "./lib/supabase.ts";
 import brandLogo from "./assets/images/one_village_logo_1784027088635.jpg";
+import ErrorBoundary from "./components/ErrorBoundary.tsx";
 
 import {
   Search,
@@ -1174,7 +1175,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#FBF7F0] text-[#241611] font-sans antialiased selection:bg-[#E3A23D]/30 pb-16 overflow-x-hidden">
+    <ErrorBoundary lang={lang}>
+      <div className="min-h-screen bg-[#FBF7F0] text-[#241611] font-sans antialiased selection:bg-[#E3A23D]/30 pb-16 overflow-x-hidden">
       <PwaUpdateBanner lang={lang} />
 
       {/* Upper Navigation Bar */}
@@ -3004,5 +3006,6 @@ export default function App() {
         />
       )}
     </div>
+    </ErrorBoundary>
   );
 }

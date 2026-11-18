@@ -4,7 +4,7 @@
  */
 
 import React, { useRef } from "react";
-import { motion, useScroll, useTransform } from "motion/react";
+import { motion, useScroll, useTransform, type Variants } from "motion/react";
 import { ServiceCategory } from "../types.ts";
 import { SUB_CATEGORIES } from "../data/bertouaData.ts";
 import { Globe, ShieldCheck, Star, ArrowRight, Users, Briefcase } from "lucide-react";
@@ -23,12 +23,12 @@ interface LandingPageProps {
 // Fade/slide-up entrance used for anything that scrolls into view. `viewport={{ once: true }}`
 // (applied where this is used) ensures each element only ever animates in once, never re-triggering
 // as the user scrolls back up and down past it.
-const fadeUp = {
+const fadeUp: Variants = {
   hidden: { opacity: 0, y: 28 },
   show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: "easeOut" } },
 };
 
-const staggerContainer = {
+const staggerContainer: Variants = {
   hidden: {},
   show: { transition: { staggerChildren: 0.08 } },
 };
