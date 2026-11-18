@@ -1595,4 +1595,12 @@ async function startServer() {
   });
 }
 
+// --- Vercel serverless adapter ----------------------------------------------------------
+// Vercel runs `api/server.js` as a serverless function and forwards every /api/* request to
+// it. Rather than re-implementing 40+ Express routes as individual functions, we expose the
+// same Express `app` instance here and let Vercel's @vercel/node runtime invoke it. The
+// adapter is a no-op when run as a standalone script (it just starts the server), so the
+// existing `npm start` / Docker path is unchanged.
+export { app as vercelHandler };
+
 startServer();

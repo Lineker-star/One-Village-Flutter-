@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: Build & Deploy (Vercel)
 
 on:
   push:
@@ -7,11 +7,6 @@ on:
     branches: [main]
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Web build + smoke test (runs on every push/PR to main).
-  # Render's own auto-deploy does the actual production deploy; this job is the
-  # gate that keeps broken commits from ever reaching the live service.
-  # ---------------------------------------------------------------------------
   web:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,25 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm install",
+  "framework": "custom",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/server.js" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": { "Cache-Control": "public, max-age=31536000, immutable" }
+    }
+  ],
+  "functions": {
+    "api/server.js": {
+      "runtime": "nodejs22.x"
+    }
+  }
+}
