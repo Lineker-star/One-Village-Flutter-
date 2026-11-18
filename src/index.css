@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  /* Redefine amber to represent our beautiful, premium Dark Navy Blue brand */
+  --color-amber-50: #F4F7FC;
+  --color-amber-100: #E8EEF8;
+  --color-amber-200: #D2DEF3;
+  --color-amber-300: #ADC0E4;
+  --color-amber-400: #869AC6;
+  --color-amber-500: #6177AA;
+  --color-amber-600: #465A8A;
+  --color-amber-700: #2E4068;
+  --color-amber-800: #1B2A4A;
+  --color-amber-900: #0F1A36;
+  --color-amber-950: #081026;
+
+  /* Redefine orange to represent our accent Red brand */
+  --color-orange-50: #FEF2F2;
+  --color-orange-100: #FEE2E2;
+  --color-orange-200: #FECACA;
+  --color-orange-300: #FCA5A5;
+  --color-orange-400: #F87171;
+  --color-orange-500: #EF4444;
+  --color-orange-600: #DC2626;
+  --color-orange-700: #B91C1C;
+  --color-orange-800: #991B1B;
+  --color-orange-900: #7F1D1D;
+  --color-orange-950: #450A0A;
+
+  /* Redefine yellow to represent lighter Red highlights / amber alerts */
+  --color-yellow-50: #FFF5F5;
+  --color-yellow-100: #FFE4E6;
+  --color-yellow-200: #FECDD3;
+  --color-yellow-300: #FDA4AF;
+  --color-yellow-400: #FB7185;
+  --color-yellow-500: #F43F5E;
+  --color-yellow-600: #E11D48;
+  --color-yellow-700: #BE123C;
+  --color-yellow-800: #9F1239;
+  --color-yellow-900: #881337;
+
+  /* Extra custom brand tokens */
+  --color-brand-navy: #081026;
+  --color-brand-red: #DC2626;
+  --color-brand-white: #FFFFFF;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
