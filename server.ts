@@ -1050,7 +1050,7 @@ app.post("/api/chat", async (req, res) => {
     // Try a chain of models so a single overloaded/unavailable model (503 "high demand") doesn't
     // force a fallback to Coarena. Override with GEMINI_MODELS (comma-separated). Each model gets
     // the same resilience wrapper; the first success wins.
-    const geminiModels = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash")
+    const geminiModels = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-2.5-flash,gemini-2.0-flash")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
