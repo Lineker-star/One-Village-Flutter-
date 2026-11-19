@@ -134,6 +134,25 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      // Split heavy third-party libraries into their own chunks so the initial app shell
+      // (index chunk) stays small and the browser can download vendor code in parallel with
+      // the app code instead of one monolithic ~2 MB file. Libraries used only by
+      // code-split routes (recharts in AdminDashboard, jspdf/leaflet in ProviderWizard) also
+      // move out of the critical path entirely because those components are lazy-loaded.
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'react-vendor': ['react', 'react-dom', 'motion'],
+            'supabase-vendor': ['@supabase/supabase-js'],
+            'charts-vendor': ['recharts'],
+            'maps-vendor': ['leaflet', 'react-leaflet'],
+            'pdf-vendor': ['jspdf', 'html2canvas'],
+            'icons-vendor': ['lucide-react'],
+          },
+        },
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.

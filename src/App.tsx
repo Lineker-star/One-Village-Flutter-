@@ -14,14 +14,29 @@ import { isMedianApp } from "./lib/platform.ts";
 import { requestPushPermission, loginPushUser, logoutPushUser, registerPushTapHandler } from "./lib/push.ts";
 import AIGuide from "./components/AIGuide.tsx";
 import BookingModal from "./components/BookingModal.tsx";
-import ProviderWizard from "./components/ProviderWizard.tsx";
 import OnboardingFlow from "./components/OnboardingFlow.tsx";
-import ChatInterface from "./components/ChatInterface.tsx";
-import AdBoard from "./components/AdBoard.tsx";
-import Dashboard from "./components/Dashboard.tsx";
 import ProviderProfile from "./components/ProviderProfile.tsx";
-import AdminDashboard from "./components/AdminDashboard.tsx";
 import PromotedAdsCarousel from "./components/PromotedAdsCarousel.tsx";
+
+// Code-split heavy, route-level components so they (and their large dependencies — recharts in
+// AdminDashboard, jspdf + leaflet in ProviderWizard) are downloaded only when actually needed,
+// shrinking the initial bundle and speeding up first paint. Lazy components must be rendered
+// inside a <Suspense> boundary (see the app shell below).
+const ProviderWizard = React.lazy(() => import("./components/ProviderWizard.tsx"));
+const ChatInterface = React.lazy(() => import("./components/ChatInterface.tsx"));
+const AdBoard = React.lazy(() => import("./components/AdBoard.tsx"));
+const Dashboard = React.lazy(() => import("./components/Dashboard.tsx"));
+const AdminDashboard = React.lazy(() => import("./components/AdminDashboard.tsx"));
+
+// Lightweight placeholder shown while a code-split chunk loads (avoids a blank flash).
+function SectionFallback() {
+  return (
+    <div className="flex items-center justify-center gap-2 py-12 text-amber-700 text-sm">
+      <span className="w-4 h-4 border-2 border-amber-300 border-t-amber-700 rounded-full animate-spin" />
+      <span>Chargement…</span>
+    </div>
+  );
+}
 import ProfileSettings from "./components/ProfileSettings.tsx";
 import LandingPage from "./components/LandingPage.tsx";
 import PublicProfessionalProfile from "./components/PublicProfessionalProfile.tsx";
@@ -2359,12 +2374,14 @@ export default function App() {
                       </div>
                     ) : activeChatProvider && currentUser ? (
                       <div className="animate-fade-in">
-                        <ChatInterface
-                          provider={activeChatProvider}
-                          currentUser={currentUser}
-                          lang={lang}
-                          onBack={() => setActiveChatProvider(null)}
-                        />
+                        <React.Suspense fallback={<SectionFallback />}>
+                          <ChatInterface
+                            provider={activeChatProvider}
+                            currentUser={currentUser}
+                            lang={lang}
+                            onBack={() => setActiveChatProvider(null)}
+                          />
+                        </React.Suspense>
                       </div>
                     ) : browseMode === "byCategory" ? (
                       /* Category-Grouped Browse View (Item 4) */
@@ -2591,7 +2608,9 @@ export default function App() {
             {/* VIEW 2: AD BOARD */}
             {activeView === "ads" && (
               <div className="animate-fade-in">
-                <AdBoard lang={lang} currentUser={currentUser} />
+                <React.Suspense fallback={<SectionFallback />}>
+                  <AdBoard lang={lang} currentUser={currentUser} />
+                </React.Suspense>
               </div>
             )}
 
@@ -2617,13 +2636,15 @@ export default function App() {
             {activeView === "dashboard" && (
               <div className="animate-fade-in max-w-4xl mx-auto">
                 {currentUser ? (
-                  <Dashboard
-                    lang={lang}
-                    activeChatProvider={activeChatProvider}
-                    setActiveChatProvider={setActiveChatProvider}
-                    currentUser={currentUser}
-                    setCurrentUser={setCurrentUser}
-                  />
+                  <React.Suspense fallback={<SectionFallback />}>
+                    <Dashboard
+                      lang={lang}
+                      activeChatProvider={activeChatProvider}
+                      setActiveChatProvider={setActiveChatProvider}
+                      currentUser={currentUser}
+                      setCurrentUser={setCurrentUser}
+                    />
+                  </React.Suspense>
                 ) : (
                   <div className="text-center py-16 bg-white border border-amber-100 rounded-3xl p-8">
                     <p className="text-sm font-bold text-amber-950">Veuillez vous connecter pour accéder à votre tableau de bord.</p>
@@ -2635,13 +2656,15 @@ export default function App() {
             {/* VIEW 4: ADMIN CONSOLE */}
             {activeView === "admin" && (
               <div className="animate-fade-in max-w-5xl mx-auto">
-                <AdminDashboard
-                  lang={lang}
-                  currentUser={currentUser}
-                  providers={providers}
-                  onRefreshProviders={() => { fetchProviders(); fetchRealProviders(); }}
-                  onOpenWizard={() => setAdminCreatingProvider(true)}
-                />
+                <React.Suspense fallback={<SectionFallback />}>
+                  <AdminDashboard
+                    lang={lang}
+                    currentUser={currentUser}
+                    providers={providers}
+                    onRefreshProviders={() => { fetchProviders(); fetchRealProviders(); }}
+                    onOpenWizard={() => setAdminCreatingProvider(true)}
+                  />
+                </React.Suspense>
               </div>
             )}
             </motion.div>
@@ -2684,18 +2707,20 @@ export default function App() {
               </button>
             </div>
 
-            <ProviderWizard
-              lang={lang}
-              userId={`admin_setup_${Date.now()}`}
-              fullName=""
-              userPhone=""
-              isAdminCreating={true}
-              onSuccess={(pData) => {
-                setAdminCreatingProvider(false);
-                fetchProviders();
-              }}
-              onCancel={() => setAdminCreatingProvider(false)}
-            />
+            <React.Suspense fallback={<SectionFallback />}>
+              <ProviderWizard
+                lang={lang}
+                userId={`admin_setup_${Date.now()}`}
+                fullName=""
+                userPhone=""
+                isAdminCreating={true}
+                onSuccess={(pData) => {
+                  setAdminCreatingProvider(false);
+                  fetchProviders();
+                }}
+                onCancel={() => setAdminCreatingProvider(false)}
+              />
+            </React.Suspense>
           </div>
         </div>
       )}

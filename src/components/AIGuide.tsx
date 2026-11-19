@@ -23,6 +23,11 @@ import {
   Play,
   HelpCircle,
   AlertTriangle,
+  Camera,
+  Copy,
+  User,
+  Paperclip,
+  Bot,
 } from "lucide-react";
 
 interface AIGuideProps {
@@ -52,11 +57,14 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
   // persisted to localStorage (keyed per browser) so continuity survives page reloads, and the
   // full transcript is sent to /api/chat on each turn — the server is stateless per request and
   // uses the client history as the source of truth (works on Vercel serverless cold starts).
-  type ChatTurn = { role: "user" | "assistant"; content: string };
+  type ChatTurn = { role: "user" | "assistant"; content: string; ts?: number };
   const [chatMessages, setChatMessages] = useState<ChatTurn[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [visionLoading, setVisionLoading] = useState(false);
   const chatSessionIdRef = React.useRef<string>("");
   const chatBottomRef = React.useRef<HTMLDivElement | null>(null);
+  const chatFileRef = React.useRef<HTMLInputElement | null>(null);
 
   // Load any prior transcript + session id once on mount (per browser).
   useEffect(() => {
@@ -87,58 +95,155 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  // Sends the whole transcript to the conversational endpoint and appends the reply.
+  // Streaming send: appends the user turn, then progressively fills an assistant bubble as
+  // tokens arrive over SSE (/api/chat/stream). Falls back to the non-streaming /api/chat if the
+  // stream errors before any token, so the UX degrades gracefully on any runtime.
+  const streamChat = async (turns: ChatTurn[]) => {
+    const assistantIndex = chatMessages.length; // index the assistant bubble will occupy
+    setChatMessages((prev) => {
+      const withUser = [...prev, { role: "user" as const, content: turns[turns.length - 1].content, ts: Date.now() }];
+      return [...withUser, { role: "assistant" as const, content: "", ts: Date.now() }];
+    });
+    setChatLoading(true);
+    setStreaming(true);
+
+    const updateAssistant = (text: string) => {
+      setChatMessages((prev) => {
+        const copy = [...prev];
+        // The assistant bubble is the last element while streaming.
+        const lastIdx = copy.length - 1;
+        if (lastIdx >= 0 && copy[lastIdx].role === "assistant" && copy[lastIdx].content === "") {
+          copy[lastIdx] = { ...copy[lastIdx], content: text };
+        }
+        return copy;
+      });
+    };
+
+    let received = false;
+    try {
+      const res = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: chatSessionIdRef.current, lang, messages: turns }),
+      });
+      if (!res.ok || !res.body) throw new Error("stream unavailable");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let acc = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data:")) continue;
+          try {
+            const evt = JSON.parse(line.slice(5).trim());
+            if (evt.delta) { acc += evt.delta; received = true; updateAssistant(acc); }
+            else if (evt.error) { if (!received) updateAssistant(evt.error); }
+          } catch { /* ignore malformed SSE line */ }
+        }
+      }
+      if (!received) throw new Error("no tokens");
+    } catch {
+      // Fallback to non-streaming endpoint.
+      try {
+        const res2 = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: chatSessionIdRef.current, lang, messages: turns }),
+        });
+        const data = await res2.json();
+        const reply = res2.ok && data.reply
+          ? data.reply
+          : data.error || (lang === "fr" ? "Désolé, je n'ai pas pu répondre." : "Sorry, I couldn't respond.");
+        updateAssistant(reply);
+        received = true;
+      } catch {
+        if (!received) {
+          updateAssistant(lang === "fr" ? "Impossible de me connecter. Vérifiez votre connexion." : "Couldn't connect. Check your connection.");
+        }
+      }
+    } finally {
+      setChatLoading(false);
+      setStreaming(false);
+    }
+  };
+
   const handleChatSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputText.trim();
     if (!text || chatLoading) return;
-
     const nextTurns: ChatTurn[] = [...chatMessages, { role: "user", content: text }];
-    setChatMessages(nextTurns);
     setInputText("");
-    setChatLoading(true);
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: chatSessionIdRef.current,
-          lang,
-          messages: nextTurns,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.reply) {
-        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
-      } else {
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content:
-              data.error ||
-              (lang === "fr"
-                ? "Désolé, je n'ai pas pu répondre. Réessayez."
-                : "Sorry, I couldn't respond. Please try again."),
-          },
-        ]);
-      }
-    } catch {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content:
-            lang === "fr"
-              ? "Impossible de me connecter. Vérifiez votre connexion."
-              : "Couldn't connect. Check your connection.",
-        },
-      ]);
-    } finally {
-      setChatLoading(false);
-    }
+    await streamChat(nextTurns);
   };
+
+  // Image attach → Gemini vision. Reads the picked file as base64 and posts it to /api/ai-vision,
+  // then shows the analysis as an assistant message.
+  const handleImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return;
+    if (file.size > 5 * 1024 * 1024) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1] || "";
+      setVisionLoading(true);
+      setChatMessages((prev) => [...prev, { role: "user", content: lang === "fr" ? "📷 [Image jointe]" : "📷 [Image attached]", ts: Date.now() }]);
+      try {
+        const res = await fetch("/api/ai-vision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ imageBase64: base64, mimeType: file.type, lang, prompt: inputText.trim() || undefined }),
+        });
+        const data = await res.json();
+        setChatMessages((prev) => [...prev, {
+          role: "assistant",
+          content: res.ok && data.text ? data.text : (data.error || (lang === "fr" ? "Impossible d'analyser l'image." : "Couldn't analyze the image.")),
+          ts: Date.now(),
+        }]);
+      } catch {
+        setChatMessages((prev) => [...prev, { role: "assistant", content: lang === "fr" ? "Échec de l'analyse de l'image." : "Image analysis failed.", ts: Date.now() }]);
+      } finally {
+        setVisionLoading(false);
+        setInputText("");
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Per-message read-aloud (French/English TTS).
+  const speakMessage = (text: string) => {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const clean = text.replace(/[#*`_]/g, "").trim();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = lang === "fr" ? "fr-FR" : "en-US";
+    window.speechSynthesis.speak(u);
+  };
+
+  // Lightweight markdown -> safe HTML (bold, italic, code, line breaks). No raw HTML injection.
+  const renderRich = (text: string) => {
+    const escaped = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    const html = escaped
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, "<code>$1</code>")
+      .replace(/\n/g, "<br/>");
+    return { __html: html };
+  };
+
+  const quickReplies = lang === "fr"
+    ? ["Trouver un plombier", "Prix d'un moto-taxi", "Un bon coiffeur", "Offres d'emploi"]
+    : ["Find a plumber", "Moto-taxi price", "A good barber", "Job openings"];
 
   // Clears the conversation (memory reset) — local transcript + server session.
   const handleChatReset = () => {
@@ -270,23 +375,43 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.lang = lang === "fr" ? "fr-FR" : "en-US";
-    recognition.interimResults = false;
+    recognition.interimResults = true; // live partial transcript for a natural, responsive feel
+    recognition.maxAlternatives = 3; // request alternatives for better accuracy on accents/dialects
 
     recognition.onstart = () => {
       setIsListening(true);
     };
 
     recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setInputText((prev) => prev + (prev ? " " : "") + transcript);
+      // Build final + interim transcript. Finalized segments are appended; the interim segment
+      // is shown live so the user sees words appear as they speak.
+      let finalText = "";
+      let interimText = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const seg = event.results[i][0].transcript;
+        if (event.results[i].isFinal) finalText += seg + " ";
+        else interimText += seg;
+      }
+      // Preserve any text the user already typed before dictating.
+      setInputText((prev) => {
+        const base = prev.replace(/\[interim:.*\]$/s, "").trim();
+        const composed = (base ? base + " " : "") + finalText.trim() + (interimText ? ` [interim:${interimText.trim()}]` : "");
+        return composed;
+      });
     };
 
     recognition.onerror = (err: any) => {
       console.error("Speech recognition error:", err);
+      // no-speech / aborted are non-fatal; don't surface an error for them.
+      if (err?.error !== "no-speech" && err?.error !== "aborted") {
+        // silently reset; the mic button returns to idle
+      }
       setIsListening(false);
     };
 
     recognition.onend = () => {
+      // Strip any leftover interim marker so the field is clean after dictation ends.
+      setInputText((prev) => prev.replace(/\s*\[interim:.*?\]\s*$/s, "").trim());
       setIsListening(false);
     };
 
@@ -516,37 +641,111 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
                 )}
               </div>
 
-              <div className="max-h-[320px] overflow-y-auto space-y-2.5 pr-1 bg-amber-50/30 border border-amber-100 rounded-2xl p-3">
+              <div className="h-[360px] overflow-y-auto space-y-3 pr-1 bg-gradient-to-b from-amber-50/40 to-white border border-amber-100 rounded-2xl p-3.5 scrollbar-thin">
                 {chatMessages.length === 0 && (
-                  <div className="text-center text-xs text-amber-800/70 py-8 px-4">
-                    {lang === "fr"
-                      ? "Bonjour ! Posez-moi une question sur les services à Bertoua. Je me souviendrai de notre conversation."
-                      : "Hi! Ask me about services in Bertoua. I'll remember our conversation."}
+                  <div className="flex flex-col items-center text-center py-10 px-4 gap-3">
+                    <div className="w-14 h-14 rounded-full bg-amber-600 overflow-hidden shadow-md border border-amber-500">
+                      <img src={brandLogo} alt="Assistant" className="w-full h-full object-cover" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-amber-950">
+                        {lang === "fr" ? "Bonjour ! Je suis votre assistant One Village" : "Hi! I'm your One Village assistant"}
+                      </p>
+                      <p className="text-xs text-amber-800/70 mt-1">
+                        {lang === "fr"
+                          ? "Posez une question sur les services à Bertoua. Je me souviendrai de notre conversation."
+                          : "Ask about services in Bertoua. I'll remember our conversation."}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap justify-center gap-1.5 max-w-sm">
+                      {quickReplies.map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => { setInputText(q); }}
+                          className="text-[11px] font-medium bg-white border border-amber-200 text-amber-900 px-3 py-1.5 rounded-full hover:bg-amber-100/60 transition-colors cursor-pointer"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {chatMessages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-                  >
-                    <div
-                      className={`max-w-[82%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed whitespace-pre-line ${
-                        m.role === "user"
-                          ? "bg-[#E3A23D] text-[#241611] rounded-tr-sm"
-                          : "bg-white text-amber-950 border border-amber-100 rounded-tl-sm"
-                      }`}
-                    >
-                      {m.content}
+                {chatMessages.map((m, i) => {
+                  const isUser = m.role === "user";
+                  const isLastAssistant = !isUser && i === chatMessages.length - 1;
+                  const showTyping = isLastAssistant && m.content === "" && streaming;
+                  return (
+                    <div key={i} className={`flex gap-2 ${isUser ? "justify-end" : "justify-start"} animate-fade-in`}>
+                      {!isUser && (
+                        <div className="w-7 h-7 rounded-full bg-amber-600 overflow-hidden shrink-0 mt-0.5 border border-amber-500">
+                          <img src={brandLogo} alt="" className="w-full h-full object-cover" />
+                        </div>
+                      )}
+                      <div className={`max-w-[78%] ${isUser ? "items-end" : "items-start"} flex flex-col`}>
+                        <div
+                          className={`px-3.5 py-2.5 rounded-2xl text-xs leading-relaxed shadow-sm ${
+                            isUser
+                              ? "bg-[#E3A23D] text-[#241611] rounded-tr-sm"
+                              : "bg-white text-amber-950 border border-amber-100 rounded-tl-sm"
+                          }`}
+                        >
+                          {showTyping ? (
+                            <div className="flex items-center gap-1.5 py-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: "120ms" }} />
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: "240ms" }} />
+                            </div>
+                          ) : isUser ? (
+                            <span className="whitespace-pre-line">{m.content}</span>
+                          ) : (
+                            <span className="whitespace-pre-wrap" dangerouslySetInnerHTML={renderRich(m.content)} />
+                          )}
+                        </div>
+                        {!isUser && !showTyping && m.content && (
+                          <div className="flex items-center gap-2 mt-1 px-1">
+                            <button
+                              type="button"
+                              onClick={() => speakMessage(m.content)}
+                              className="text-amber-600 hover:text-amber-900 transition-colors cursor-pointer"
+                              title={lang === "fr" ? "Lire à voix haute" : "Read aloud"}
+                            >
+                              <Volume2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => navigator.clipboard?.writeText(m.content)}
+                              className="text-amber-600 hover:text-amber-900 transition-colors cursor-pointer"
+                              title={lang === "fr" ? "Copier" : "Copy"}
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            {m.ts && (
+                              <span className="text-[9px] text-amber-700/50">
+                                {new Date(m.ts).toLocaleTimeString(lang === "fr" ? "fr-FR" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {isUser && (
+                        <div className="w-7 h-7 rounded-full bg-amber-200 flex items-center justify-center shrink-0 mt-0.5">
+                          <User className="w-4 h-4 text-amber-800" />
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
 
-                {chatLoading && (
-                  <div className="flex justify-start">
+                {visionLoading && (
+                  <div className="flex gap-2 justify-start">
+                    <div className="w-7 h-7 rounded-full bg-amber-600 overflow-hidden shrink-0 border border-amber-500">
+                      <img src={brandLogo} alt="" className="w-full h-full object-cover" />
+                    </div>
                     <div className="bg-white border border-amber-100 rounded-2xl rounded-tl-sm px-3.5 py-2.5 flex items-center gap-2 text-xs text-amber-700">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      {lang === "fr" ? "L'assistant écrit..." : "Assistant is typing..."}
+                      {lang === "fr" ? "Analyse de l'image..." : "Analyzing image..."}
                     </div>
                   </div>
                 )}
@@ -639,6 +838,27 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
               />
 
               <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                {/* Image attach (chat tab only) → Gemini vision */}
+                {activeTab === "chat" && (
+                  <>
+                    <input
+                      ref={chatFileRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleImagePick}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => chatFileRef.current?.click()}
+                      disabled={visionLoading || chatLoading}
+                      title={lang === "fr" ? "Joindre une image" : "Attach image"}
+                      className="p-2 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 disabled:opacity-40 transition-all cursor-pointer"
+                    >
+                      <Camera className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
                 {/* Stage B Pulse Microphone Button */}
                 <button
                   type="button"

@@ -9,7 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { ServiceProvider, ServiceCategory, PromotedAd } from "./src/types.ts";
-import { CATEGORY_DETAILS, SUB_CATEGORIES } from "./src/data/bertouaData.ts";
+import { CATEGORY_DETAILS, SUB_CATEGORIES, BERTOUA_NEIGHBORHOODS } from "./src/data/bertouaData.ts";
 
 // Plain dotenv.config() only ever loads a file literally named ".env", which doesn't exist in
 // this project — GEMINI_API_KEY (and everything else) actually lives in .env.local, matching
@@ -998,14 +998,97 @@ function pruneChatMemory() {
   }
 }
 
+// --- Knowledge integration / real-time app context --------------------------------------
+// Builds a live snapshot of the whole app ecosystem (provider directory, professional profiles,
+// neighborhoods) so the AI can give accurate, context-aware navigation guidance. The snapshot
+// is cached with a short TTL (4 min) so it stays fresh without hammering Supabase on every
+// message — new providers/changes appear within minutes. Falls back to the built-in seed
+// providers when Supabase isn't reachable, so the assistant always has *something* to work with.
+
+let knowledgeCache: { at: number; byLang: Record<string, string> } = { at: 0, byLang: {} };
+const KNOWLEDGE_TTL_MS = 4 * 60 * 1000;
+
+async function fetchProviderDirectory(): Promise<Array<{ name: string; business: string; category: string; neighborhood: string; rate: number; unit: string; verified: boolean; available: boolean; rating: number }>> {
+  const admin = getSupabaseAdmin();
+  if (admin) {
+    try {
+      // public_provider_cards is the safe (phone-masked) view used by the public directory.
+      const { data, error } = await admin
+        .from("public_provider_cards")
+        .select("name, business_name, category, neighborhood_id, rate_fcfa, rate_unit, verified, available, rating")
+        .limit(100);
+      if (!error && Array.isArray(data) && data.length > 0) {
+        return data.map((r: any) => ({
+          name: r.name || "",
+          business: r.business_name || "",
+          category: r.category || "",
+          neighborhood: r.neighborhood_id || "",
+          rate: r.rate_fcfa || 0,
+          unit: r.rate_unit || "",
+          verified: !!r.verified,
+          available: r.available !== false,
+          rating: r.rating || 0,
+        }));
+      }
+    } catch {
+      /* fall through to seeds */
+    }
+  }
+  // Fallback: the in-memory seed providers.
+  return providers.map((p) => ({
+    name: p.name,
+    business: (p as any).businessName || "",
+    category: p.category,
+    neighborhood: p.neighborhoodId || "",
+    rate: p.rateFCFA || 0,
+    unit: p.rateUnit || "",
+    verified: !!p.verified,
+    available: p.available !== false,
+    rating: p.rating || 0,
+  }));
+}
+
+async function getKnowledgeSnapshot(lang: "fr" | "en"): Promise<string> {
+  const now = Date.now();
+  if (knowledgeCache.at && now - knowledgeCache.at < KNOWLEDGE_TTL_MS && knowledgeCache.byLang[lang]) {
+    return knowledgeCache.byLang[lang];
+  }
+
+  const [directory, neighborhoods] = await Promise.all([
+    fetchProviderDirectory(),
+    Promise.resolve(BERTOUA_NEIGHBORHOODS || []),
+  ]);
+
+  const hoodBlock = neighborhoods.length
+    ? (lang === "en"
+        ? `Neighborhoods of Bertoua: ${neighborhoods.map((n: any) => n.name || n.label || n.id).filter(Boolean).join(", ")}.`
+        : `Quartiers de Bertoua : ${neighborhoods.map((n: any) => n.name || n.label || n.id).filter(Boolean).join(", ")}.`)
+    : "";
+
+  const dirLines = directory.slice(0, 60).map((p) => {
+    const status = p.available ? (lang === "en" ? "available" : "disponible") : (lang === "en" ? "busy" : "occupé");
+    const ver = p.verified ? " ✓" : "";
+    return `- ${p.name}${p.business ? ` (${p.business})` : ""} — ${p.category}, ${p.neighborhood || "Bertoua"}, ${p.rate} FCFA/${p.unit}, ${p.rating ? p.rating + "★" : ""}, ${status}${ver}`;
+  });
+
+  const block = lang === "en"
+    ? `\n\nLIVE PROVIDER DIRECTORY (use real names/services/prices when recommending):\n${hoodBlock}\n${dirLines.join("\n")}`
+    : `\n\nANNUAIRE DES PRESTATAIRES EN DIRECT (utilise les vrais noms/services/tarifs pour recommander) :\n${hoodBlock}\n${dirLines.join("\n")}`;
+
+  knowledgeCache = { at: now, byLang: { ...knowledgeCache.byLang, [lang]: block } };
+  return block;
+}
+
 // Builds the shared persona/grounding system instruction for the conversational assistant.
 async function buildChatSystemInstruction(lang: "fr" | "en"): Promise<string> {
   const liveCategories = await fetchLiveCategories();
   const intro = lang === "en"
-    ? `You are "One Village Assistant", the friendly local AI helper for the One Village platform in Bertoua (East Region, Cameroon). You help residents find reliable local services and help providers present their work. You are warm, concise and professional — NOT a preacher or elder. Never use religious blessings or terms like "my child". Keep simple answers to 2-4 sentences; go longer only if the user asks for detail. You remember the conversation so far and answer follow-up questions naturally (e.g. "yes, she's available" or "that would cost around 3000 FCFA"). You speak French and English fluently and know the main local languages: Gbaya, Makaa, Fulfulde.`
-    : `Tu es "Assistant One Village", l'assistant IA local et sympathique de la plateforme One Village à Bertoua (région de l'Est du Cameroun). Tu aides les habitants à trouver des services locaux fiables et les prestataires à mieux présenter leur activité. Ton chaleureux, amical et professionnel — ce n'est PAS un sage, un prédicateur ou un ancien du village. N'utilise JAMAIS de formules religieuses, de bénédictions, ou d'expressions comme "mon enfant". Réponses COURTES par défaut : 2 à 4 phrases pour une question simple. Tu te SOUVIENS de la conversation et réponds naturellement aux questions de suivi (ex. "oui, elle est disponible", "ça coûterait environ 3000 FCFA"). Tu parles couramment français et anglais, et tu connais les langues locales majeures de l'Est : Gbaya, Makaa, Fulfulde.`;
+    ? `You are "One Village Assistant", the friendly local AI helper for the One Village platform in Bertoua (East Region, Cameroon). You help residents find reliable local services and help providers present their work. You are warm, concise and professional — NOT a preacher or elder. Never use religious blessings or terms like "my child". Keep simple answers to 2-4 sentences; go longer only if the user asks for detail. You remember the conversation so far and answer follow-up questions naturally (e.g. "yes, she's available" or "that would cost around 3000 FCFA"). You speak French and English fluently and know the main local languages: Gbaya, Makaa, Fulfulde. You also have a live directory of ALL providers on the platform — use real names, services, neighborhoods and prices when recommending someone.`
+    : `Tu es "Assistant One Village", l'assistant IA local et sympathique de la plateforme One Village à Bertoua (région de l'Est du Cameroun). Tu aides les habitants à trouver des services locaux fiables et les prestataires à mieux présenter leur activité. Ton chaleureux, amical et professionnel — ce n'est PAS un sage, un prédicateur ou un ancien du village. N'utilise JAMAIS de formules religieuses, de bénédictions, ou d'expressions comme "mon enfant". Réponses COURTES par défaut : 2 à 4 phrases pour une question simple. Tu te SOUVIENS de la conversation et réponds naturellement aux questions de suivi (ex. "oui, elle est disponible", "ça coûterait environ 3000 FCFA"). Tu parles couramment français et anglais, et tu connais les langues locales majeures de l'Est : Gbaya, Makaa, Fulfulde. Tu disposes aussi d'un annuaire EN DIRECT de TOUS les prestataires de la plateforme — utilise les vrais noms, services, quartiers et tarifs pour recommander quelqu'un de précis.`;
 
-  return `${intro}\n\nVoici les catégories et métiers RÉELLEMENT disponibles sur One Village — appuie-toi dessus pour des réponses concrètes :\n${buildCategoryContextBlock(liveCategories)}`;
+  const knowledge = await getKnowledgeSnapshot(lang);
+
+  return `${intro}\n\nVoici les catégories et métiers RÉELLEMENT disponibles sur One Village — appuie-toi dessus pour des réponses concrètes :\n${buildCategoryContextBlock(liveCategories)}\n${knowledge}`;
 }
 
 app.post("/api/chat", async (req, res) => {
@@ -1101,6 +1184,193 @@ app.post("/api/chat", async (req, res) => {
     ? "I'm temporarily offline right now. Please try again in a moment."
     : "Je suis temporairement hors ligne. Réessayez dans un instant.";
   return res.status(503).json({ error: offline, provider: "none", conversationId: sid });
+});
+
+// --- Streaming chat (SSE) for real-time, low-latency responses ---------------------------
+// Same contract as /api/chat but streams tokens as Server-Sent Events so the UI can render the
+// answer progressively instead of waiting for the full reply. Event types:
+//   data: {"delta":"..."}                 -> append this text
+//   data: {"done":true,"provider":..}     -> stream complete
+//   data: {"error":"..."}                 -> unrecoverable error
+// Gemini streams natively; if Gemini is unavailable we fall back to Coarena (streamed if
+// possible, otherwise sent as a single delta). A non-streaming client can still call /api/chat.
+
+app.post("/api/chat/stream", async (req, res) => {
+  const { sessionId, messages, lang } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "messages is required and must be a non-empty array." });
+  }
+  const turns: ChatTurn[] = messages
+    .filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+    .slice(-CHAT_MAX_TURNS)
+    .map((m: any) => ({ role: m.role, content: m.content }));
+  if (turns.length === 0 || turns[turns.length - 1].role !== "user") {
+    return res.status(400).json({ error: "The last message must be from the user." });
+  }
+
+  const sid = (sessionId || "").toString().slice(0, 64) || `sess_${Date.now()}`;
+  const effectiveLang: "fr" | "en" = lang === "en" ? "en" : "fr";
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  (res as any).flushHeaders?.();
+
+  const send = (obj: any) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  // Build the system instruction (same grounding as /api/chat).
+  let systemInstruction: string;
+  try {
+    systemInstruction = await buildChatSystemInstruction(effectiveLang);
+  } catch {
+    systemInstruction = `Tu es "Assistant One Village", l'assistant IA de Bertoua. Réponds brièvement.`;
+  }
+  const lastUser = turns[turns.length - 1].content;
+  if (isJobRelatedQuery(lastUser)) {
+    const jobSample = await fetchOpenJobSample(5);
+    if (jobSample.length > 0) systemInstruction += `\n\nOffres d'emploi ouvertes :\n${buildJobContextBlock(jobSample)}`;
+  }
+
+  const contents = turns.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+
+  // --- Try Gemini streaming across the model chain ---
+  const gemini = getGeminiClient();
+  if (gemini) {
+    const geminiModels = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-2.5-flash,gemini-2.0-flash")
+      .split(",").map((s) => s.trim()).filter(Boolean);
+    for (const model of geminiModels) {
+      let emitted = false;
+      try {
+        const streamResp = await gemini.models.generateContentStream({
+          model,
+          contents,
+          config: { systemInstruction, temperature: 0.7 },
+        });
+        for await (const chunk of streamResp) {
+          const t = (chunk as any)?.text;
+          if (t) { send({ delta: t }); emitted = true; }
+        }
+        if (emitted) {
+          send({ done: true, provider: "gemini", model, conversationId: sid });
+          return res.end();
+        }
+      } catch (err: any) {
+        if (emitted) {
+          // Already streamed part of this model's answer — finish gracefully rather than
+          // restarting mid-message (which would duplicate text).
+          send({ done: true, provider: "gemini", model, conversationId: sid, warning: "stream interrupted" });
+          return res.end();
+        }
+        console.warn(`[chat/stream] Gemini ${model} failed before first token — ${err?.status ?? ""} ${String(err?.message || err).slice(0, 140)}`);
+        if (err?.status === 401 || err?.status === 403) break;
+        continue;
+      }
+    }
+  }
+
+  // --- Fallback: Coarena (non-streamed, sent as a single delta) ---
+  if (getCoarenaConfig()) {
+    try {
+      const reply = await generateWithCoarena(turns, systemInstruction, "chat/stream");
+      send({ delta: reply });
+      send({ done: true, provider: "coarena", conversationId: sid });
+      return res.end();
+    } catch (err: any) {
+      console.error(`[chat/stream] Coarena fallback failed — ${err?.message || err}`);
+    }
+  }
+
+  const offline = effectiveLang === "en" ? "I'm temporarily offline. Try again shortly." : "Je suis temporairement hors ligne. Réessayez sous peu.";
+  send({ error: offline, provider: "none" });
+  res.end();
+});
+
+// --- Vision: image recognition via Gemini (multimodal) ------------------------------------
+// Accepts a base64 image + prompt and asks Gemini to describe/analyze it in the context of
+// One Village (e.g. "identify this object", "what service does this relate to", "read this
+// handwritten note"). Used by the AI Guide's new image-attach button. Falls back to a helpful
+// text response if Gemini isn't configured.
+app.post("/api/ai-vision", async (req, res) => {
+  const { imageBase64, mimeType, prompt, lang } = req.body || {};
+  if (!imageBase64 || typeof imageBase64 !== "string") {
+    return res.status(400).json({ error: "imageBase64 is required." });
+  }
+  const ai = getGeminiClient();
+  const effectiveLang: "fr" | "en" = lang === "en" ? "en" : "fr";
+  const instruction = (prompt && String(prompt).trim())
+    ? String(prompt)
+    : (effectiveLang === "en"
+        ? "Describe this image and, if relevant, suggest which One Village service (plumbing, electrical, tailoring, agriculture, transport, childcare, etc.) it relates to. Be concise."
+        : "Décris cette image et, si pertinent, indique à quel service One Village (plomberie, électricité, couture, agriculture, transport, garde d'enfants, etc.) elle se rapporte. Sois concis.");
+
+  if (!ai) {
+    return res.status(503).json({ error: effectiveLang === "en" ? "Vision is not configured." : "La reconnaissance d'image n'est pas configurée." });
+  }
+
+  const models = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-2.5-flash,gemini-2.0-flash")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+
+  const contents = [{
+    role: "user",
+    parts: [
+      { inlineData: { mimeType: mimeType || "image/jpeg", data: imageBase64.replace(/^data:[^;]+;base64,/, "") } },
+      { text: instruction },
+    ],
+  }];
+  const systemInstruction = effectiveLang === "en"
+    ? 'You are "One Village Assistant" in Bertoua, Cameroon. Analyze the image helpfully and briefly.'
+    : 'Tu es "Assistant One Village" à Bertoua. Analyse l\'image de façon utile et brève.';
+
+  for (const model of models) {
+    try {
+      const response = await generateContentWithResilience(ai, {
+        model,
+        contents,
+        config: { systemInstruction, temperature: 0.5 },
+      }, `vision:${model}`);
+      if (response.text) {
+        return res.json({ text: response.text, provider: "gemini", model });
+      }
+    } catch (err: any) {
+      const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
+      console.warn(`[ai-vision] Gemini ${model} failed — ${mode}: ${String(err?.message || err).slice(0, 140)}`);
+      if (err?.status === 401 || err?.status === 403) break;
+      continue;
+    }
+  }
+
+  // Fallback: Coarena vision-capable model (OpenAI-style image_url content).
+  const coarena = getCoarenaConfig();
+  if (coarena) {
+    try {
+      const dataUrl = `data:${mimeType || "image/jpeg"};base64,${imageBase64.replace(/^data:[^;]+;base64,/, "")}`;
+      const resp = await fetch(`${coarena.url}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${coarena.key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: coarena.model,
+          messages: [
+            { role: "system", content: systemInstruction },
+            { role: "user", content: [
+              { type: "text", text: instruction },
+              { type: "image_url", image_url: { url: dataUrl } },
+            ] },
+          ],
+          temperature: 0.5,
+        }),
+      });
+      if (resp.ok) {
+        const data: any = await resp.json();
+        const text = data?.choices?.[0]?.message?.content;
+        if (text) return res.json({ text, provider: "coarena", model: coarena.model });
+      }
+    } catch (err: any) {
+      console.error(`[ai-vision] Coarena failed — ${err?.message || err}`);
+    }
+  }
+
+  return res.status(502).json({ error: effectiveLang === "en" ? "Image analysis failed." : "L'analyse de l'image a échoué." });
 });
 
 // Clears a session's stored history (client also clears its local transcript).
