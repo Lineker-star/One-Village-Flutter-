@@ -41,6 +41,6 @@
     "vite-plugin-pwa": "^1.3.0"
   },
   "engines": {
-    "node": "20.x"
+    "node": "26.x"
   }
 }
