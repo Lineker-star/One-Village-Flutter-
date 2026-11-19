@@ -1598,9 +1598,17 @@ async function startServer() {
 // --- Vercel serverless adapter ----------------------------------------------------------
 // Vercel runs `api/server.js` as a serverless function and forwards every /api/* request to
 // it. Rather than re-implementing 40+ Express routes as individual functions, we expose the
-// same Express `app` instance here and let Vercel's @vercel/node runtime invoke it. The
-// adapter is a no-op when run as a standalone script (it just starts the server), so the
-// existing `npm start` / Docker path is unchanged.
+// same Express `app` instance here and let Vercel's @vercel/node runtime invoke it.
+//
+// CRITICAL: startServer() must NOT run inside the Vercel function. In a serverless runtime
+// there is no long-lived port to bind, and NODE_ENV is not guaranteed to be "production", so
+// the dev branch would try to boot Vite (vite.config.ts isn't present in the function bundle)
+// and crash the function with a 500. On Vercel (process.env.VERCEL is set) we only export the
+// app and let the platform invoke it per-request. Static assets are served by Vercel's CDN
+// from dist/ directly, and the SPA fallback is handled by the vercel.json rewrite — the
+// Express static/catch-all is only needed for the standalone `npm start`/Docker path.
 export { app as vercelHandler };
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
