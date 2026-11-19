@@ -1378,19 +1378,85 @@ app.post("/api/chat/reset", (req, res) => {
 });
 
 // --- Push notification subscriptions (scalable, FCM-ready) --------------------------------
-// Stores Web Push subscriptions so the server (or FCM via a server-side VAPID/FCM key) can target
-// this device. In-memory store here mirrors the rest of the dev-mode server; a production deployment
-// would persist these to Supabase (e.g. a push_subscriptions table) — the route contract is stable.
+// Persists Web Push subscriptions to Supabase (push_subscriptions table) when the service role
+// key is configured, so the server (or FCM via the web-push library) can target devices even
+// across instances/restarts. Falls back to an in-memory store for local dev without Supabase.
 const pushSubscriptions = new Map<string, any>();
-app.post("/api/push/subscribe", (req, res) => {
+app.post("/api/push/subscribe", async (req, res) => {
   const { endpoint, keys, userId, userAgent } = req.body || {};
   if (!endpoint || typeof endpoint !== "string") {
     return res.status(400).json({ error: "endpoint is required" });
   }
-  pushSubscriptions.set(endpoint, { endpoint, keys, userId: userId || null, userAgent: userAgent || null, updatedAt: Date.now() });
-  res.json({ ok: true, stored: pushSubscriptions.size });
+  const p256dh = keys?.p256dh || null;
+  const auth = keys?.auth || null;
+  const admin = getSupabaseAdmin();
+  if (admin) {
+    const { error } = await admin
+      .from("push_subscriptions")
+      .upsert(
+        { endpoint, p256dh, auth, user_id: userId || null, user_agent: userAgent || null, updated_at: new Date().toISOString() },
+        { onConflict: "endpoint" }
+      );
+    if (error) {
+      console.error("[push] Supabase upsert failed:", error.message);
+      // Fall through to in-memory so the request still succeeds.
+    } else {
+      return res.json({ ok: true, persisted: "supabase" });
+    }
+  }
+  pushSubscriptions.set(endpoint, { endpoint, p256dh, auth, userId: userId || null, userAgent: userAgent || null, updatedAt: Date.now() });
+  res.json({ ok: true, persisted: "memory", stored: pushSubscriptions.size });
 });
-app.get("/api/push/subscription-count", (_req, res) => res.json({ count: pushSubscriptions.size }));
+app.get("/api/push/subscription-count", async (_req, res) => {
+  const admin = getSupabaseAdmin();
+  if (admin) {
+    const { count } = await admin.from("push_subscriptions").select("*", { count: "exact", head: true });
+    return res.json({ count: count || 0 });
+  }
+  res.json({ count: pushSubscriptions.size });
+});
+
+// Broadcast a Web Push notification to all stored subscriptions (admin only). Uses the `web-push`
+// library with the VAPID keys. Expired endpoints (410/404) are pruned from Supabase.
+app.post("/api/admin/push/broadcast", async (req, res) => {
+  const { title, body, url, data } = req.body || {};
+  if (!title) return res.status(400).json({ error: "title is required" });
+  const vapidSubject = process.env.VAPID_SUBJECT || "mailto:admin@onevillage.site";
+  const vapidPublicKey = process.env.VITE_VAPID_PUBLIC_KEY || process.env.VAPID_PUBLIC_KEY;
+  const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+  if (!vapidPublicKey || !vapidPrivateKey) {
+    return res.status(503).json({ error: "Web Push not configured (missing VAPID keys)." });
+  }
+  let subscriptions: any[] = [];
+  const admin = getSupabaseAdmin();
+  if (admin) {
+    const { data: rows } = await admin.from("push_subscriptions").select("endpoint, p256dh, auth");
+    subscriptions = (rows || []).map((r: any) => ({ endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } }));
+  } else {
+    subscriptions = Array.from(pushSubscriptions.values()).map((s: any) => ({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }));
+  }
+
+  const webpush = require("web-push");
+  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+  const payload = JSON.stringify({ title, body, url: url || "/", data: data || {} });
+  let sent = 0, pruned = 0;
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification(sub, payload);
+      sent++;
+    } catch (err: any) {
+      if (err?.statusCode === 410 || err?.statusCode === 404) {
+        // Gone — prune.
+        if (admin) await admin.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+        else pushSubscriptions.delete(sub.endpoint);
+        pruned++;
+      } else {
+        console.warn("[push] send failed:", err?.statusCode, err?.message);
+      }
+    }
+  }
+  res.json({ ok: true, total: subscriptions.length, sent, pruned });
+});
 
 // --- Phase 11 & 12: Referrals & Admin API Endpoints ---
 
