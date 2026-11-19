@@ -5,7 +5,6 @@
 
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
@@ -1577,6 +1576,10 @@ app.post("/api/admin/push/send", async (req, res) => {
 // Vite & Static Asset Handling
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    // Loaded dynamically (and kept external in the esbuild bundle) so the production bundle
+    // never pulls Vite in — Vite is a dev-only dependency and its module has top-level code
+    // that breaks when bundled to CJS. On Vercel, startServer() doesn't run at all.
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
