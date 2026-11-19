@@ -53,3 +53,52 @@
 .animate-fade-in {
   animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* ---------------------------------------------------------------------------
+ * Global polish (mobile-first, native-feel refinements)
+ * ------------------------------------------------------------------------- */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  /* Crisp text on all platforms (macOS/iOS/Android). */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* Prevent horizontal rubber-band overflow on iOS. */
+  overscroll-behavior-y: none;
+}
+
+/* Consistent, accessible focus ring for keyboard users (does not affect touch). */
+:focus-visible {
+  outline: 2px solid var(--color-amber-500);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Slim, unobtrusive scrollbars (WebKit). */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-amber-400) 60%, transparent); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-amber-500); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Respect the user's reduced-motion preference globally (belt-and-suspenders alongside
+ * Framer Motion's useReducedMotion). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Tap highlight: remove the grey flash on mobile taps (we use our own active states). */
+* { -webkit-tap-highlight-color: transparent; }
+
+/* Thin scrollbar utility for scrollable chat/thread areas. */
+.scrollbar-thin::-webkit-scrollbar { width: 6px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-amber-400) 55%, transparent); border-radius: 8px; }

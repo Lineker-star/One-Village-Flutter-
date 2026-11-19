@@ -1377,6 +1377,21 @@ app.post("/api/chat/reset", (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Push notification subscriptions (scalable, FCM-ready) --------------------------------
+// Stores Web Push subscriptions so the server (or FCM via a server-side VAPID/FCM key) can target
+// this device. In-memory store here mirrors the rest of the dev-mode server; a production deployment
+// would persist these to Supabase (e.g. a push_subscriptions table) — the route contract is stable.
+const pushSubscriptions = new Map<string, any>();
+app.post("/api/push/subscribe", (req, res) => {
+  const { endpoint, keys, userId, userAgent } = req.body || {};
+  if (!endpoint || typeof endpoint !== "string") {
+    return res.status(400).json({ error: "endpoint is required" });
+  }
+  pushSubscriptions.set(endpoint, { endpoint, keys, userId: userId || null, userAgent: userAgent || null, updatedAt: Date.now() });
+  res.json({ ok: true, stored: pushSubscriptions.size });
+});
+app.get("/api/push/subscription-count", (_req, res) => res.json({ count: pushSubscriptions.size }));
+
 // --- Phase 11 & 12: Referrals & Admin API Endpoints ---
 
 // 1. In-memory data structures for Referrals, Category Suggestions, Suspensions, Flags

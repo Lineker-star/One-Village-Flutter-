@@ -1,9 +1,10 @@
-import {StrictMode, useState} from 'react';
+import {StrictMode, useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import LaunchSplash from './components/LaunchSplash.tsx';
 import OfflineBanner from './components/OfflineBanner.tsx';
 import {isMedianApp} from './lib/platform.ts';
+import {useAppLifecycle} from './hooks/useAppLifecycle.ts';
 import './index.css';
 
 // Rendered as a true sibling of <App/> at the actual React root, not from inside App itself — App
@@ -12,16 +13,59 @@ import './index.css';
 // (and reset the timer of) a fresh LaunchSplash instance every time App switches between them during
 // the cold-boot sequence. Here its lifecycle is entirely independent of whatever App does internally.
 //
+// The splash now runs for EVERY cold boot (not only the Median-wrapped build), giving the PWA a
+// native-quality launch on web too. It is shown once per tab session (sessionStorage) so ordinary
+// in-app navigations and soft reloads don't replay it — only a genuine cold start does. When it
+// finishes, the app wrapper plays a subtle coordinated entrance (scale + fade) so the handoff from
+// splash to dashboard reads as one continuous motion rather than a cut.
+//
 // OfflineBanner is mounted the same way, for the same reason, and gated behind isMedianApp() per
 // the scope reminder — the desktop/browser PWA experience is unchanged by item 4's in-app UI.
 function Root() {
-  const [showSplash, setShowSplash] = useState(() => isMedianApp());
+  // Centralized lifecycle tracking (online/offline, visibility, BFCache, freeze/resume). Drives
+  // background-sync draining on reconnect and exposes connectivity to the rest of the app.
+  useAppLifecycle();
+
+  const [showSplash, setShowSplash] = useState(() => {
+    try {
+      // Show on cold start unless already shown this tab session.
+      return sessionStorage.getItem('ov_splash_shown') !== '1';
+    } catch {
+      return true;
+    }
+  });
+  // Once the splash is gone (or skipped), mark the session and play the app entrance.
+  const [appEntered, setAppEntered] = useState(!showSplash);
   const isMedian = isMedianApp();
+
+  useEffect(() => {
+    if (!showSplash) {
+      try { sessionStorage.setItem('ov_splash_shown', '1'); } catch {}
+    }
+  }, [showSplash]);
+
+  const handleSplashComplete = () => {
+    try { sessionStorage.setItem('ov_splash_shown', '1'); } catch {}
+    setShowSplash(false);
+    // Next frame: trigger the app's coordinated entrance so it animates in sync with the
+    // splash's exit rather than appearing statically underneath.
+    requestAnimationFrame(() => setAppEntered(true));
+  };
+
   return (
     <>
-      {showSplash && <LaunchSplash onComplete={() => setShowSplash(false)} />}
+      <div
+        className="min-h-screen"
+        style={{
+          opacity: appEntered ? 1 : 0,
+          transform: appEntered ? 'scale(1)' : 'scale(0.985)',
+          transition: 'opacity 500ms cubic-bezier(0.22,1,0.36,1), transform 500ms cubic-bezier(0.22,1,0.36,1)',
+        }}
+      >
+        <App />
+      </div>
+      {showSplash && <LaunchSplash lang="fr" onComplete={handleSplashComplete} />}
       {isMedian && <OfflineBanner />}
-      <App />
     </>
   );
 }

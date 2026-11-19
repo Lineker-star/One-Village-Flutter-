@@ -1,0 +1,14 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAMID.site.onevillage.app",
+        "paths": ["/pro/*", "/company/*", "/job/*", "/"]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID.site.onevillage.app"]
+  }
+}

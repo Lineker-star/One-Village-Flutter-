@@ -12,6 +12,7 @@ import InstallAppButton from "./components/InstallAppButton.tsx";
 import PwaUpdateBanner from "./components/PwaUpdateBanner.tsx";
 import { isMedianApp } from "./lib/platform.ts";
 import { requestPushPermission, loginPushUser, logoutPushUser, registerPushTapHandler } from "./lib/push.ts";
+import { navigateToIntent } from "./lib/deepLinks.ts";
 import AIGuide from "./components/AIGuide.tsx";
 import BookingModal from "./components/BookingModal.tsx";
 import OnboardingFlow from "./components/OnboardingFlow.tsx";
@@ -438,29 +439,47 @@ export default function App() {
   // complete, matching "request at an appropriate point, not immediately on cold start" rather than
   // firing it the instant a brand-new signup lands.
   useEffect(() => {
-    if (!isMedianApp() || !currentUser) return;
+    if (!currentUser) return;
     loginPushUser(currentUser.id);
     if (currentUser.onboarding_completed) {
-      requestPushPermission();
+      // Works on both the Median native build and the PWA/Web Push path; no-ops where unsupported.
+      requestPushPermission(currentUser.id);
       supabaseService.registerPushSubscription(currentUser.id);
     }
   }, [currentUser?.id, currentUser?.onboarding_completed]);
 
   // Notification-tap deep-linking (see src/lib/push.ts + server.ts's /api/admin/push/send, which
   // attaches this same "activeView" key to the notification's data payload). Registered once,
-  // unconditionally — registerPushTapHandler itself no-ops outside the Median wrapper.
+  // unconditionally — registerPushTapHandler itself no-ops outside supported runtimes. The handler
+  // now receives a normalized DeepLinkIntent plus the raw payload; we honor the legacy activeView /
+  // path fields AND route any structured intent through the central deep-link navigator.
   useEffect(() => {
-    registerPushTapHandler((data) => {
+    registerPushTapHandler((intent, data) => {
       const validViews = ["browse", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
       if (typeof data.activeView === "string" && (validViews as readonly string[]).includes(data.activeView)) {
         setShowLandingPage(false);
         setActiveView(data.activeView as typeof validViews[number]);
       } else if (typeof data.path === "string") {
-        // One of the standalone pathname-routed pages (job/company/professional profile) — a real
-        // navigation, not an activeView switch, so a full load is correct here.
         window.location.href = data.path;
+      } else if (intent && intent.type !== "unknown") {
+        // Central routing for provider/job/company/view/chat/referral intents.
+        navigateToIntent(intent);
       }
     });
+  }, []);
+
+  // React to in-app deep-link navigation events (dispatched by deepLinks.navigateToIntent for
+  // warm navigations that don't require a full page load — e.g. a push tap while the app is open).
+  useEffect(() => {
+    const onNav = (e: any) => {
+      const intent = e?.detail?.intent;
+      if (intent?.type === "view") {
+        setShowLandingPage(false);
+        setActiveView(intent.view as any);
+      }
+    };
+    window.addEventListener("ov:navigate", onNav as any);
+    return () => window.removeEventListener("ov:navigate", onNav as any);
   }, []);
 
   const t = {
