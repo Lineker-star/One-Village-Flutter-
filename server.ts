@@ -1045,6 +1045,7 @@ app.post("/api/chat", async (req, res) => {
 
   // --- PRIMARY: Gemini (multi-turn) ---
   const gemini = getGeminiClient();
+  let geminiError = "";
   if (gemini) {
     try {
       const contents = turns.map((m) => ({
@@ -1052,18 +1053,22 @@ app.post("/api/chat", async (req, res) => {
         parts: [{ text: m.content }],
       }));
       const response = await generateContentWithResilience(gemini, {
-        model: "gemini-3.5-flash",
+        model: process.env.GEMINI_MODEL || "gemini-3.5-flash",
         contents,
         config: { systemInstruction, temperature: 0.7 },
       }, "chat");
       if (response.text) {
         return res.json({ reply: response.text, provider: "gemini", conversationId: sid });
       }
+      geminiError = "empty response";
     } catch (err: any) {
       const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
-      console.warn(`[chat] Gemini failed — ${mode}, status: ${err?.status ?? "n/a"}, message: ${err?.message || err}. Trying Coarena fallback.`);
+      // Capture a short, non-sensitive reason so the client/diagnostics can show WHY we fell back.
+      geminiError = `${mode}: ${String(err?.status ?? "")} ${String(err?.message || err).slice(0, 200)}`;
+      console.warn(`[chat] Gemini failed — ${geminiError}. Trying Coarena fallback.`);
     }
   } else {
+    geminiError = "GEMINI_API_KEY not set";
     console.warn("[chat] GEMINI_API_KEY not set; using Coarena directly.");
   }
 
@@ -1071,9 +1076,10 @@ app.post("/api/chat", async (req, res) => {
   if (getCoarenaConfig()) {
     try {
       const reply = await generateWithCoarena(turns, systemInstruction, "chat");
-      return res.json({ reply, provider: "coarena", conversationId: sid });
+      return res.json({ reply, provider: "coarena", conversationId: sid, geminiError });
     } catch (err: any) {
       console.error(`[chat] Coarena fallback failed — ${err?.message || err}`);
+      return res.status(502).json({ error: "Both AI providers failed.", provider: "none", geminiError, coarenaError: String(err?.message || err).slice(0, 200) });
     }
   }
 
