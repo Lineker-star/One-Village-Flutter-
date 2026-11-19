@@ -1,14 +1,41 @@
 {
-  "name": "One Village",
+  "name": "One Village — Services à Bertoua",
   "short_name": "One Village",
   "description": "Trouvez des prestataires de confiance à Bertoua. Find trusted service providers in Bertoua.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait-primary",
   "lang": "fr",
+  "dir": "ltr",
+  "categories": ["business", "lifestyle", "utilities"],
   "theme_color": "#FBF7F0",
   "background_color": "#FBF7F0",
+  "prefer_related_applications": false,
+  "shortcuts": [
+    {
+      "name": "Assistant IA",
+      "short_name": "Assistant",
+      "description": "Ouvrir l'assistant One Village",
+      "url": "/?view=ai",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Offres d'emploi",
+      "short_name": "Emplois",
+      "description": "Voir les offres d'emploi",
+      "url": "/?view=jobs",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Annonces",
+      "short_name": "Annonces",
+      "description": "Voir les annonces de la communauté",
+      "url": "/?view=ads",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
   "icons": [
     {
       "src": "/icons/icon-192.png",
@@ -21,6 +48,18 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { ServiceProvider, ServiceCategory, UserProfile } from "./types.ts";
 import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "./data/bertouaData.ts";
@@ -90,7 +91,7 @@ import {
 
 export default function App() {
   const [lang, setLang] = useState<"fr" | "en">("fr");
-  const [activeView, setActiveView] = useState<"browse" | "ads" | "jobs" | "professionals" | "dashboard" | "admin">("browse");
+  const [activeView, setActiveView] = useState<"browse" | "ai" | "ads" | "jobs" | "professionals" | "dashboard" | "admin">("browse");
 
   // Native-feeling transitions between the main tabs (Median-wrapped mobile only — see
   // isMedianApp(); a no-op transition elsewhere leaves the desktop/browser PWA experience exactly
@@ -99,7 +100,7 @@ export default function App() {
   // the new view's position in a fixed left-to-right order against the previous one, same idea as
   // how a native tab bar knows push (forward) vs pop (back).
   const isMedian = isMedianApp();
-  const VIEW_ORDER = ["browse", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
+  const VIEW_ORDER = ["browse", "ai", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
   const prevViewRef = useRef(activeView);
   const [navDirection, setNavDirection] = useState(1);
   useEffect(() => {
@@ -316,6 +317,10 @@ export default function App() {
       title = "Annonces - One Village";
       description =
         "Parcourez les petites announcements et offres promotionnelles de la communaute de Bertoua.";
+    } else if (activeView === "ai") {
+      title = "Assistant IA - One Village";
+      description =
+        "Assistant IA One Village : trouvez un service, traduisez, estimez un tarif a Bertoua.";
     } else if (activeView === "jobs") {
       title = "Emplois - One Village";
       description =
@@ -457,7 +462,7 @@ export default function App() {
   // path fields AND route any structured intent through the central deep-link navigator.
   useEffect(() => {
     registerPushTapHandler((intent, data) => {
-      const validViews = ["browse", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
+      const validViews = ["browse", "ai", "ads", "jobs", "professionals", "dashboard", "admin"] as const;
       if (typeof data.activeView === "string" && (validViews as readonly string[]).includes(data.activeView)) {
         setShowLandingPage(false);
         setActiveView(data.activeView as typeof validViews[number]);
@@ -952,16 +957,13 @@ export default function App() {
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* ignore */ }
   };
 
-  // AI Assistant tab: jump to the assistant widget on the browse view (it lives there).
+  // AI Assistant tab: dedicated page (no longer a scroll target on the home feed).
   const handleBottomAI = () => {
     setShowLandingPage(false);
     setMobileMenuOpen(false);
     setActiveChatProvider(null);
-    setActiveView("browse");
-    setTimeout(() => {
-      const el = document.getElementById("ai-guide-widget");
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 120);
+    setActiveView("ai");
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* ignore */ }
   };
 
   // Center FAB: reuse the provider-signup / dashboard flow (auth-gated).
@@ -969,10 +971,11 @@ export default function App() {
     handleAppBarGetService();
   };
 
-  // Which bottom-nav item is active (AI is a momentary jump, not a persistent view).
-  const bottomNavActive: NavView | null = (() => {
+  // Which bottom-nav item is active. 'ai' is now a real page, so it highlights when active.
+  const bottomNavActive: NavView | "ai" | null = (() => {
     switch (activeView) {
       case "browse": return "browse";
+      case "ai": return "ai";
       case "dashboard": return "dashboard";
       case "jobs": return "jobs";
       case "professionals": return "professionals";
@@ -980,6 +983,31 @@ export default function App() {
       default: return null;
     }
   })();
+
+  // Lock background scroll while the auth (sign in / sign up) modal is open. The overlay is
+  // `fixed inset-0` with a backdrop blur, but without this the long page behind it would still
+  // scroll — making the "background" feel too long. Locking body scroll keeps the blurred backdrop
+  // pinned to the viewport (fits the screen) while the modal box itself keeps its own height.
+  useEffect(() => {
+    if (!showAuthModal) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [showAuthModal]);
+
+  // Honor ?view=<tab> on cold start (PWA manifest shortcuts, push deep links, shared URLs).
+  useEffect(() => {
+    try {
+      const v = new URLSearchParams(window.location.search).get("view");
+      const valid = ["browse", "ai", "ads", "jobs", "professionals", "dashboard"];
+      if (v && valid.includes(v)) {
+        setShowLandingPage(false);
+        setActiveView(v as any);
+      }
+    } catch { /* ignore */ }
+  }, []);
 
   // Item 2: routes straight to the Step 8b professional profile creation form (ProfileSettings'
   // "professional" tab, which renders ProfessionalProfileEditor) from the Explorer menu, the
@@ -1711,7 +1739,7 @@ export default function App() {
                     </div>
                   ) : (
                   selectedCategory === "ALL" && selectedNeighborhood === "ALL" && searchQuery === "" && selectedFilterSection === "none" && !selectedProviderForProfile && !activeChatProvider && (
-                    <div className="space-y-8 bg-[#FBF7F0] border border-amber-200/40 rounded-3xl p-6 sm:p-8 shadow-sm">
+                    <div className="hidden lg:block space-y-8 bg-[#FBF7F0] border border-amber-200/40 rounded-3xl p-6 sm:p-8 shadow-sm">
                       <div className="border-b border-amber-100 pb-3 flex items-center justify-between">
                         <div>
                           <h3 className="text-base sm:text-lg font-black text-amber-950 uppercase tracking-tight">
@@ -2641,17 +2669,8 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Right Column: AI Guide */}
+                  {/* Right Column: local info (AI assistant moved to its own dedicated tab) */}
                   <div className="lg:col-span-4 space-y-6">
-                    <div className="bg-white border border-amber-100 rounded-3xl p-1.5 shadow-sm overflow-hidden">
-                      <AIGuide
-                        lang={lang}
-                        onApplyPolishedDescription={(text) => {
-                          console.log("Applied polished text:", text);
-                        }}
-                      />
-                    </div>
-
                     {/* Bertoua Info box */}
                     <div className="bg-white border border-amber-100 rounded-2xl p-5 shadow-sm space-y-3.5">
                       <h4 className="font-bold text-amber-950 text-xs uppercase tracking-wider flex items-center gap-1.5">
@@ -2664,6 +2683,15 @@ export default function App() {
                       </p>
                     </div>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* VIEW 1b: AI ASSISTANT (dedicated page) */}
+            {activeView === "ai" && (
+              <div className="animate-fade-in max-w-3xl mx-auto">
+                <div className="bg-white border border-amber-100 rounded-3xl p-1.5 sm:p-2 shadow-sm">
+                  <AIGuide lang={lang} onApplyPolishedDescription={() => {}} />
                 </div>
               </div>
             )}
@@ -2752,17 +2780,22 @@ export default function App() {
       {/* Spacer so the fixed bottom nav never covers the last content */}
       <div className="h-20 lg:h-6" aria-hidden />
 
-      {/* Native-style fixed bottom navigation (mobile-first; floating pill on desktop) */}
-      <BottomNav
-        lang={lang}
-        active={bottomNavActive}
-        onNavigate={handleBottomNavigate}
-        onAI={handleBottomAI}
-        onOffer={handleBottomOffer}
-      />
-
-      {/* Prominent floating "Install App" affordance above the nav */}
-      <InstallAppButton lang={lang} variant="fab" />
+      {/* Native-style fixed bottom navigation + install FAB, portaled to <body> so no transformed
+          ancestor (e.g. the app-entrance wrapper in main.tsx or Framer view transitions) can make
+          `position: fixed` scroll away with the page. They stay pinned to the viewport. */}
+      {createPortal(
+        <>
+          <BottomNav
+            lang={lang}
+            active={bottomNavActive}
+            onNavigate={handleBottomNavigate}
+            onAI={handleBottomAI}
+            onOffer={handleBottomOffer}
+          />
+          <InstallAppButton lang={lang} variant="fab" />
+        </>,
+        document.body
+      )}
 
       {/* ADMIN ASSISTED SETUP OVERLAY */}
       {adminCreatingProvider && (
