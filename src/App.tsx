@@ -1721,6 +1721,10 @@ export default function App() {
             {/* VIEW 1: BROWSE DIRECTORY */}
             {activeView === "browse" && (
               <div className="space-y-8 animate-fade-in" id="search-listings-container">
+                {/* Mobile-only prominent install banner (the floating button is always present too) */}
+                <div className="lg:hidden">
+                  <InstallAppButton lang={lang} variant="banner" />
+                </div>
                 {/* Horizontal Scrolling Discover Feeds for Signed-in Users (Phase 10) vs Guest Hero */}
                 {currentUser ? (
                   compactView ? (

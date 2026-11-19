@@ -210,6 +210,19 @@ if (typeof window !== 'undefined') {
   }, { capture: true });
 }
 
+// Capture `beforeinstallprompt` as early as possible (before React mounts) so the install button
+// never misses the event on fast pages. usePwaInstall() reads window.__ovDeferredInstallPrompt.
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    (window as any).__ovDeferredInstallPrompt = e;
+  });
+  window.addEventListener('appinstalled', () => {
+    (window as any).__ovDeferredInstallPrompt = null;
+    try { localStorage.setItem('ov_installed', '1'); } catch {}
+  });
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <Root />

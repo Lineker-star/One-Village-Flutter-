@@ -32,20 +32,33 @@ function detectIOS(): boolean {
  * "Add to Home Screen" case, which never fires that event at all.
  */
 export function usePwaInstall() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(() => isStandaloneDisplayMode());
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
+    // Pick up an event that fired before React mounted (captured early in main.tsx).
+    return ((window as any).__ovDeferredInstallPrompt as BeforeInstallPromptEvent) || null;
+  });
+  const [isInstalled, setIsInstalled] = useState(() => {
+    if (isStandaloneDisplayMode()) return true;
+    try { return localStorage.getItem("ov_installed") === "1"; } catch { return false; }
+  });
   const [isIOS] = useState(() => detectIOS());
 
   useEffect(() => {
     if (isInstalled) return;
 
+    // If the event fired before this effect ran, adopt it now.
+    const early = (window as any).__ovDeferredInstallPrompt as BeforeInstallPromptEvent | undefined;
+    if (early && !deferredPrompt) setDeferredPrompt(early);
+
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
+      (window as any).__ovDeferredInstallPrompt = e;
       setDeferredPrompt(e as BeforeInstallPromptEvent);
     };
     const handleAppInstalled = () => {
+      (window as any).__ovDeferredInstallPrompt = null;
       setDeferredPrompt(null);
       setIsInstalled(true);
+      try { localStorage.setItem("ov_installed", "1"); } catch {}
     };
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
@@ -54,7 +67,7 @@ export function usePwaInstall() {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
       window.removeEventListener("appinstalled", handleAppInstalled);
     };
-  }, [isInstalled]);
+  }, [isInstalled, deferredPrompt]);
 
   const promptInstall = useCallback(async () => {
     if (!deferredPrompt) return false;
