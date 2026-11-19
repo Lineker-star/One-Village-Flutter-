@@ -12,7 +12,9 @@ interface InstallAppButtonProps {
   // "hero": prominent standalone CTA (landing page, next to "Commencer").
   // "compact": small header/nav-bar button.
   // "banner": dismissible full-width strip (browse/home page).
-  variant: "hero" | "compact" | "banner";
+  // "fab": floating action button that hovers above the bottom nav — the most prominent,
+  //        always-reachable install affordance on mobile.
+  variant: "hero" | "compact" | "banner" | "fab";
 }
 
 export default function InstallAppButton({ lang, variant }: InstallAppButtonProps) {
@@ -83,6 +85,39 @@ export default function InstallAppButton({ lang, variant }: InstallAppButtonProp
             <button
               onClick={() => setShowIOSHelp(false)}
               className="absolute top-2 right-2 p-1 text-amber-800/60 hover:text-amber-950 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+            <p className="text-xs text-amber-900 font-serif flex items-start gap-2">
+              <Share className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              {iosInstructions}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // "fab"
+  if (variant === "fab") {
+    return (
+      <div className="fixed right-4 bottom-24 lg:bottom-24 z-40 flex flex-col items-end gap-2">
+        <button
+          onClick={handleClick}
+          className="flex items-center gap-2 rounded-full bg-gradient-to-br from-amber-500 to-amber-700 text-white pl-3.5 pr-4 py-3 shadow-xl ring-1 ring-white/40 active:scale-95 transition-transform"
+          aria-label={label}
+        >
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/20">
+            <Download className="h-4 w-4" />
+          </span>
+          <span className="text-xs font-black whitespace-nowrap">{label}</span>
+        </button>
+        {showIOSHelp && (
+          <div className="w-72 bg-white border border-amber-200 rounded-2xl shadow-xl p-4 text-left">
+            <button
+              onClick={() => setShowIOSHelp(false)}
+              className="float-right p-1 text-amber-800/60 hover:text-amber-950 cursor-pointer"
+              aria-label={lang === "fr" ? "Fermer" : "Close"}
             >
               <X className="w-3.5 h-3.5" />
             </button>

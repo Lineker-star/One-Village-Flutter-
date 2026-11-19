@@ -9,6 +9,8 @@ import { ServiceProvider, ServiceCategory, UserProfile } from "./types.ts";
 import { BERTOUA_NEIGHBORHOODS, CATEGORY_DETAILS, SUB_CATEGORIES } from "./data/bertouaData.ts";
 import ServiceCard from "./components/ServiceCard.tsx";
 import InstallAppButton from "./components/InstallAppButton.tsx";
+import BottomNav from "./components/BottomNav.tsx";
+import type { NavView } from "./components/BottomNav.tsx";
 import PwaUpdateBanner from "./components/PwaUpdateBanner.tsx";
 import { isMedianApp } from "./lib/platform.ts";
 import { requestPushPermission, loginPushUser, logoutPushUser, registerPushTapHandler } from "./lib/push.ts";
@@ -936,6 +938,48 @@ export default function App() {
       if (el) el.scrollIntoView({ behavior: "smooth" });
     }
   };
+
+  // --- Native bottom navigation -----------------------------------------------------------
+  // Switches primary sections without the long website-style scroll. Each tab closes any open
+  // menus/chat and returns to the top so the transition feels like a native tab change.
+  const handleBottomNavigate = (view: NavView) => {
+    setShowLandingPage(false);
+    setMobileMenuOpen(false);
+    setExploreMenuOpen(false);
+    setUserMenuOpen(false);
+    setActiveChatProvider(null);
+    setActiveView(view);
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* ignore */ }
+  };
+
+  // AI Assistant tab: jump to the assistant widget on the browse view (it lives there).
+  const handleBottomAI = () => {
+    setShowLandingPage(false);
+    setMobileMenuOpen(false);
+    setActiveChatProvider(null);
+    setActiveView("browse");
+    setTimeout(() => {
+      const el = document.getElementById("ai-guide-widget");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+  };
+
+  // Center FAB: reuse the provider-signup / dashboard flow (auth-gated).
+  const handleBottomOffer = () => {
+    handleAppBarGetService();
+  };
+
+  // Which bottom-nav item is active (AI is a momentary jump, not a persistent view).
+  const bottomNavActive: NavView | null = (() => {
+    switch (activeView) {
+      case "browse": return "browse";
+      case "dashboard": return "dashboard";
+      case "jobs": return "jobs";
+      case "professionals": return "professionals";
+      case "ads": return "ads";
+      default: return null;
+    }
+  })();
 
   // Item 2: routes straight to the Step 8b professional profile creation form (ProfileSettings'
   // "professional" tab, which renders ProfessionalProfileEditor) from the Explorer menu, the
@@ -2704,6 +2748,21 @@ export default function App() {
           </button>
         </div>
       </footer>
+
+      {/* Spacer so the fixed bottom nav never covers the last content */}
+      <div className="h-20 lg:h-6" aria-hidden />
+
+      {/* Native-style fixed bottom navigation (mobile-first; floating pill on desktop) */}
+      <BottomNav
+        lang={lang}
+        active={bottomNavActive}
+        onNavigate={handleBottomNavigate}
+        onAI={handleBottomAI}
+        onOffer={handleBottomOffer}
+      />
+
+      {/* Prominent floating "Install App" affordance above the nav */}
+      <InstallAppButton lang={lang} variant="fab" />
 
       {/* ADMIN ASSISTED SETUP OVERLAY */}
       {adminCreatingProvider && (
