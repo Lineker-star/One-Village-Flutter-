@@ -1,15 +1,20 @@
 // Vercel serverless entry point for the One Village API.
 //
-// Vercel routes /api/* requests here (see vercel.json rewrites: /api/(.*) -> /api). It
-// invokes this function with the ORIGINAL request URL preserved (e.g. /api/health), so the
-// Express app's routes (app.get("/api/health", ...), etc.) match correctly. Vercel serves the
-// SPA + static assets from dist/ via its CDN; this function only handles API traffic.
+// Vercel routes /api/* requests here (vercel.json rewrites /api/(.*) -> /api). It invokes this
+// function with the ORIGINAL URL preserved (e.g. /api/health) so the Express routes match.
+// Vercel serves the SPA + static assets from dist/ via its CDN; this function only handles API.
 //
-// The Express app itself lives in server.ts, bundled to dist/server.cjs by esbuild (npm run
-// build). startServer() is guarded so it does NOT run inside the function (no port binding /
-// Vite boot serverless) — see server.ts's `if (!process.env.VERCEL)` check.
+// The Express app lives in server.ts, bundled by esbuild (npm run build) to server.bundle.cjs
+// at the PROJECT ROOT (CommonJS) — NOT inside dist/, because dist/ is the static
+// outputDirectory uploaded to the CDN and isn't on the function's runtime filesystem.
+// startServer() is guarded by !process.env.VERCEL in server.ts, so no port/Vite boot happens.
+//
+// This file is ESM (package.json has "type":"module"), so we bridge to the CommonJS bundle via
+// createRequire rather than using require() directly.
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { vercelHandler } = require("../dist/server.cjs");
+import { createRequire } from "module";
 
-module.exports = vercelHandler;
+const require = createRequire(import.meta.url);
+const { vercelHandler } = require("../server.bundle.cjs");
+
+export default vercelHandler;
