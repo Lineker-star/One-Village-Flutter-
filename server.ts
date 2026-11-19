@@ -30,12 +30,16 @@ app.use(express.json());
 // VITE_-prefixed or it would get bundled into the client). Used to verify the caller's JWT and look
 // up their role directly, bypassing RLS, since this is the trusted server-side admin boundary.
 let supabaseAdmin: SupabaseClient | null = null;
+// Public Supabase project URL. It is safe to hardcode as a fallback (the URL is public; only the
+// service-role key is secret). This keeps server-side admin working even if VITE_SUPABASE_URL is
+// not exported into the serverless runtime environment — only SUPABASE_SERVICE_ROLE_KEY is needed.
+const SUPABASE_URL_FALLBACK = "https://meqegazofwxrzvviixhl.supabase.co";
 function getSupabaseAdmin(): SupabaseClient | null {
   if (!supabaseAdmin) {
-    const url = process.env.VITE_SUPABASE_URL;
+    const url = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || SUPABASE_URL_FALLBACK;
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceRoleKey) {
-      console.warn("VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not defined. Admin routes will reject all requests.");
+    if (!serviceRoleKey) {
+      console.warn("SUPABASE_SERVICE_ROLE_KEY is not defined. Admin routes will reject all requests.");
       return null;
     }
     supabaseAdmin = createClient(url, serviceRoleKey, {
