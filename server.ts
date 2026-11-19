@@ -107,6 +107,59 @@ function getGeminiClient() {
   return aiInstance;
 }
 
+// --- Coarena AI client (OpenAI-compatible) ---------------------------------------------
+// Coarena exposes an OpenAI-style Chat Completions API at ${COARENA_URL}/chat/completions
+// with Bearer auth. We use it as a SECOND reasoner alongside Gemini: the conversational
+// /api/chat endpoint tries Gemini first and transparently falls back to Coarena if Gemini is
+// unavailable/quota-limited, so the assistant stays online even when one provider is down.
+// Model can be overridden via COARENA_MODEL; defaults to a fast, strong general model.
+function getCoarenaConfig(): { url: string; key: string; model: string } | null {
+  const key = process.env.COARENA_API_KEY;
+  if (!key) return null;
+  const url = (process.env.COARENA_URL || "https://coarena.ai/api/v1").replace(/\/+$/, "");
+  const model = process.env.COARENA_MODEL || "gpt-6-luna";
+  return { url, key, model };
+}
+
+// Calls Coarena's OpenAI-compatible chat completions endpoint with the full message history
+// (system + prior turns) and returns the assistant's text. Throws on non-2xx so callers can
+// fall back / surface an error. Uses the global fetch available on Node 18+ / Vercel.
+async function generateWithCoarena(
+  messages: Array<{ role: string; content: string }>,
+  systemInstruction: string,
+  label: string
+): Promise<string> {
+  const cfg = getCoarenaConfig();
+  if (!cfg) throw new Error("COARENA_API_KEY is not configured");
+
+  const payload = {
+    model: cfg.model,
+    messages: [
+      { role: "system", content: systemInstruction },
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+    ],
+    temperature: 0.7,
+  };
+
+  const resp = await fetch(`${cfg.url}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(`[${label}] Coarena ${resp.status}: ${detail.slice(0, 300)}`);
+  }
+  const data: any = await resp.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error(`[${label}] Coarena returned no content`);
+  return text as string;
+}
+
 // --- AI guide performance/reliability helpers (Part A) ---
 
 const GEMINI_TIMEOUT_MS = 18000;
@@ -904,6 +957,127 @@ ${buildJobContextBlock(jobSample)}` : ""}`;
     }
     res.status(500).json({ error: "L'appel à l'IA a échoué. Veuillez réessayer.", details: error.message });
   }
+});
+
+// --- Conversational AI chat with memory + continuity ------------------------------------
+// A real, stateful chatbot endpoint. Unlike /api/ai-guide (stateless one-shot tools for the
+// translate/polish/pricing tabs), /api/chat maintains an ongoing conversation so the assistant
+// remembers prior turns ("memory and continuity like a normal chatbot").
+//
+// Memory model: the CLIENT is the source of truth for the transcript (it keeps the message
+// array and localStorage), and sends the full history with each request. The server ALSO keeps
+// a best-effort in-memory copy keyed by sessionId — useful on warm instances and for a
+// server-authoritative reset — but never depends on it, so it works correctly on Vercel's
+// serverless (cold) invocations where in-memory state doesn't persist.
+//
+// Provider strategy ("working together"): Gemini is the PRIMARY reasoner. If Gemini is
+// unavailable (no key / quota / timeout / error), the endpoint transparently FALLS BACK to
+// Coarena (OpenAI-compatible), so the assistant stays online even if one provider is down. The
+// response includes `provider` so the client can show which engine answered.
+
+interface ChatTurn { role: "user" | "assistant"; content: string }
+const chatMemory = new Map<string, { turns: ChatTurn[]; updatedAt: number }>();
+const CHAT_MEMORY_TTL_MS = 1000 * 60 * 60 * 6; // 6h
+const CHAT_MAX_TURNS = 30; // cap history sent to the model to bound tokens
+
+function pruneChatMemory() {
+  const now = Date.now();
+  for (const [id, entry] of chatMemory) {
+    if (now - entry.updatedAt > CHAT_MEMORY_TTL_MS) chatMemory.delete(id);
+  }
+}
+
+// Builds the shared persona/grounding system instruction for the conversational assistant.
+async function buildChatSystemInstruction(lang: "fr" | "en"): Promise<string> {
+  const liveCategories = await fetchLiveCategories();
+  const intro = lang === "en"
+    ? `You are "One Village Assistant", the friendly local AI helper for the One Village platform in Bertoua (East Region, Cameroon). You help residents find reliable local services and help providers present their work. You are warm, concise and professional — NOT a preacher or elder. Never use religious blessings or terms like "my child". Keep simple answers to 2-4 sentences; go longer only if the user asks for detail. You remember the conversation so far and answer follow-up questions naturally (e.g. "yes, she's available" or "that would cost around 3000 FCFA"). You speak French and English fluently and know the main local languages: Gbaya, Makaa, Fulfulde.`
+    : `Tu es "Assistant One Village", l'assistant IA local et sympathique de la plateforme One Village à Bertoua (région de l'Est du Cameroun). Tu aides les habitants à trouver des services locaux fiables et les prestataires à mieux présenter leur activité. Ton chaleureux, amical et professionnel — ce n'est PAS un sage, un prédicateur ou un ancien du village. N'utilise JAMAIS de formules religieuses, de bénédictions, ou d'expressions comme "mon enfant". Réponses COURTES par défaut : 2 à 4 phrases pour une question simple. Tu te SOUVIENS de la conversation et réponds naturellement aux questions de suivi (ex. "oui, elle est disponible", "ça coûterait environ 3000 FCFA"). Tu parles couramment français et anglais, et tu connais les langues locales majeures de l'Est : Gbaya, Makaa, Fulfulde.`;
+
+  return `${intro}\n\nVoici les catégories et métiers RÉELLEMENT disponibles sur One Village — appuie-toi dessus pour des réponses concrètes :\n${buildCategoryContextBlock(liveCategories)}`;
+}
+
+app.post("/api/chat", async (req, res) => {
+  const { sessionId, messages, lang } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "messages is required and must be a non-empty array." });
+  }
+  // Keep only well-formed user/assistant turns, cap to the last N to bound tokens.
+  const turns: ChatTurn[] = messages
+    .filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+    .slice(-CHAT_MAX_TURNS)
+    .map((m: any) => ({ role: m.role, content: m.content }));
+
+  if (turns.length === 0 || turns[turns.length - 1].role !== "user") {
+    return res.status(400).json({ error: "The last message must be from the user." });
+  }
+
+  const sid = (sessionId || "").toString().slice(0, 64) || `sess_${Date.now()}`;
+  const effectiveLang: "fr" | "en" = lang === "en" ? "en" : "fr";
+
+  // Persist to the best-effort memory store (client history remains source of truth).
+  pruneChatMemory();
+  chatMemory.set(sid, { turns, updatedAt: Date.now() });
+
+  const lastUser = turns[turns.length - 1].content;
+  const jobSample = isJobRelatedQuery(lastUser) ? await fetchOpenJobSample(5) : [];
+
+  let systemInstruction: string;
+  try {
+    systemInstruction = await buildChatSystemInstruction(effectiveLang);
+  } catch {
+    systemInstruction = `Tu es "Assistant One Village", l'assistant IA de Bertoua. Réponds brièvement et avec bienveillance.`;
+  }
+  if (jobSample.length > 0) {
+    systemInstruction += `\n\nVoici quelques offres d'emploi RÉELLEMENT ouvertes en ce moment — si l'utilisateur cherche du travail, mentionne une offre pertinente :\n${buildJobContextBlock(jobSample)}`;
+  }
+
+  // --- PRIMARY: Gemini (multi-turn) ---
+  const gemini = getGeminiClient();
+  if (gemini) {
+    try {
+      const contents = turns.map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+      }));
+      const response = await generateContentWithResilience(gemini, {
+        model: "gemini-3.5-flash",
+        contents,
+        config: { systemInstruction, temperature: 0.7 },
+      }, "chat");
+      if (response.text) {
+        return res.json({ reply: response.text, provider: "gemini", conversationId: sid });
+      }
+    } catch (err: any) {
+      const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
+      console.warn(`[chat] Gemini failed — ${mode}, status: ${err?.status ?? "n/a"}, message: ${err?.message || err}. Trying Coarena fallback.`);
+    }
+  } else {
+    console.warn("[chat] GEMINI_API_KEY not set; using Coarena directly.");
+  }
+
+  // --- FALLBACK: Coarena (OpenAI-compatible, multi-turn) ---
+  if (getCoarenaConfig()) {
+    try {
+      const reply = await generateWithCoarena(turns, systemInstruction, "chat");
+      return res.json({ reply, provider: "coarena", conversationId: sid });
+    } catch (err: any) {
+      console.error(`[chat] Coarena fallback failed — ${err?.message || err}`);
+    }
+  }
+
+  // --- Both providers unavailable: honest offline message (client keeps its UI usable) ---
+  const offline = effectiveLang === "en"
+    ? "I'm temporarily offline right now. Please try again in a moment."
+    : "Je suis temporairement hors ligne. Réessayez dans un instant.";
+  return res.status(503).json({ error: offline, provider: "none", conversationId: sid });
+});
+
+// Clears a session's stored history (client also clears its local transcript).
+app.post("/api/chat/reset", (req, res) => {
+  const { sessionId } = req.body || {};
+  if (sessionId) chatMemory.delete(String(sessionId).slice(0, 64));
+  res.json({ ok: true });
 });
 
 // --- Phase 11 & 12: Referrals & Admin API Endpoints ---

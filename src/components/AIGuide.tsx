@@ -47,6 +47,116 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
   const [loading, setLoading] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
 
+  // --- Stateful conversation (memory + continuity) -------------------------------------
+  // The chat tab keeps a real transcript so the assistant remembers prior turns. History is
+  // persisted to localStorage (keyed per browser) so continuity survives page reloads, and the
+  // full transcript is sent to /api/chat on each turn — the server is stateless per request and
+  // uses the client history as the source of truth (works on Vercel serverless cold starts).
+  type ChatTurn = { role: "user" | "assistant"; content: string };
+  const [chatMessages, setChatMessages] = useState<ChatTurn[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatSessionIdRef = React.useRef<string>("");
+  const chatBottomRef = React.useRef<HTMLDivElement | null>(null);
+
+  // Load any prior transcript + session id once on mount (per browser).
+  useEffect(() => {
+    try {
+      let sid = localStorage.getItem("ov_chat_session");
+      if (!sid) {
+        sid = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        localStorage.setItem("ov_chat_session", sid);
+      }
+      chatSessionIdRef.current = sid;
+      const saved = localStorage.getItem("ov_chat_history");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setChatMessages(parsed.slice(-30));
+      }
+    } catch {
+      chatSessionIdRef.current = `sess_${Date.now()}`;
+    }
+  }, []);
+
+  // Persist transcript whenever it changes.
+  useEffect(() => {
+    try {
+      localStorage.setItem("ov_chat_history", JSON.stringify(chatMessages.slice(-30)));
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
+    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
+  // Sends the whole transcript to the conversational endpoint and appends the reply.
+  const handleChatSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = inputText.trim();
+    if (!text || chatLoading) return;
+
+    const nextTurns: ChatTurn[] = [...chatMessages, { role: "user", content: text }];
+    setChatMessages(nextTurns);
+    setInputText("");
+    setChatLoading(true);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: chatSessionIdRef.current,
+          lang,
+          messages: nextTurns,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.reply) {
+        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+      } else {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              data.error ||
+              (lang === "fr"
+                ? "Désolé, je n'ai pas pu répondre. Réessayez."
+                : "Sorry, I couldn't respond. Please try again."),
+          },
+        ]);
+      }
+    } catch {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            lang === "fr"
+              ? "Impossible de me connecter. Vérifiez votre connexion."
+              : "Couldn't connect. Check your connection.",
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  // Clears the conversation (memory reset) — local transcript + server session.
+  const handleChatReset = () => {
+    setChatMessages([]);
+    try {
+      localStorage.removeItem("ov_chat_history");
+    } catch {
+      /* ignore */
+    }
+    if (chatSessionIdRef.current) {
+      fetch("/api/chat/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: chatSessionIdRef.current }),
+      }).catch(() => {});
+    }
+  };
+
   // AI availability banner: the server returns a specific 503 body when GEMINI_API_KEY is not set,
   // and the first request of every session used to just silently fall back to the generic error
   // string ("Une erreur est survenue."). We now probe once on mount and keep a stable flag so the
@@ -381,6 +491,70 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
         </div>
       ) : (
         <div className="space-y-4">
+          {/* Stateful chat thread (memory + continuity) — shown only on the Chat tab */}
+          {activeTab === "chat" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-amber-950 flex items-center gap-1">
+                  <MessageSquare className="w-3.5 h-3.5 text-amber-700" />
+                  {lang === "fr" ? "Conversation" : "Conversation"}
+                  {chatMessages.length > 0 && (
+                    <span className="ml-1 text-[10px] font-medium text-amber-800/60">
+                      ({chatMessages.filter((m) => m.role === "user").length})
+                    </span>
+                  )}
+                </span>
+                {chatMessages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleChatReset}
+                    disabled={chatLoading}
+                    className="text-[10px] font-semibold text-amber-700 hover:text-amber-950 disabled:opacity-40 cursor-pointer px-2 py-1 rounded-md hover:bg-amber-100/60 transition-colors"
+                  >
+                    {lang === "fr" ? "Nouvelle discussion" : "New chat"}
+                  </button>
+                )}
+              </div>
+
+              <div className="max-h-[320px] overflow-y-auto space-y-2.5 pr-1 bg-amber-50/30 border border-amber-100 rounded-2xl p-3">
+                {chatMessages.length === 0 && (
+                  <div className="text-center text-xs text-amber-800/70 py-8 px-4">
+                    {lang === "fr"
+                      ? "Bonjour ! Posez-moi une question sur les services à Bertoua. Je me souviendrai de notre conversation."
+                      : "Hi! Ask me about services in Bertoua. I'll remember our conversation."}
+                  </div>
+                )}
+
+                {chatMessages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[82%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed whitespace-pre-line ${
+                        m.role === "user"
+                          ? "bg-[#E3A23D] text-[#241611] rounded-tr-sm"
+                          : "bg-white text-amber-950 border border-amber-100 rounded-tl-sm"
+                      }`}
+                    >
+                      {m.content}
+                    </div>
+                  </div>
+                ))}
+
+                {chatLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-white border border-amber-100 rounded-2xl rounded-tl-sm px-3.5 py-2.5 flex items-center gap-2 text-xs text-amber-700">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      {lang === "fr" ? "L'assistant écrit..." : "Assistant is typing..."}
+                    </div>
+                  </div>
+                )}
+                <div ref={chatBottomRef} />
+              </div>
+            </div>
+          )}
+
           {activeTab === "translate" && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2 bg-amber-100/40 p-3 rounded-xl border border-amber-200/30">
@@ -431,11 +605,27 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
           )}
 
           {/* Prompt Entry & STT Micro option */}
-          <form onSubmit={handleAISubmit} className="space-y-4">
+          <form
+            onSubmit={(e) => {
+              if (activeTab === "chat") {
+                handleChatSend(e);
+              } else {
+                handleAISubmit(e);
+              }
+            }}
+            className="space-y-4"
+          >
             <div className="relative">
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter sends on the chat tab (Shift+Enter = newline); other tabs keep default.
+                  if (activeTab === "chat" && e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatSend(e as any);
+                  }
+                }}
                 placeholder={
                   activeTab === "chat"
                     ? t.chatPlaceholder
@@ -469,11 +659,11 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
 
                 <button
                   type="submit"
-                  disabled={loading || !inputText.trim()}
+                  disabled={(activeTab === "chat" ? chatLoading : loading) || !inputText.trim()}
                   id="btn-ai-submit"
                   className="p-2 bg-[#E3A23D] hover:bg-[#F2B355] text-[#241611] rounded-lg disabled:opacity-45 transition-all duration-150 hover:scale-105 active:scale-95 cursor-pointer"
                 >
-                  {loading ? (
+                  {(activeTab === "chat" ? chatLoading : loading) ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
                     <Send className="w-4 h-4" />
@@ -485,8 +675,8 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
         </div>
       )}
 
-      {/* Response Box */}
-      {(loading || response) && activeTab !== "video" && (
+      {/* Response Box (single-shot tools only — the Chat tab renders its own thread) */}
+      {(loading || response) && activeTab !== "video" && activeTab !== "chat" && (
         <div className="mt-5 bg-white border border-amber-100 rounded-2xl p-4 shadow-inner space-y-3">
           {loading ? (
             <div className="flex items-center gap-2.5 text-xs text-amber-800 py-4">
