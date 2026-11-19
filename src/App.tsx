@@ -2781,9 +2781,9 @@ export default function App() {
       <div className="h-20 lg:h-6" aria-hidden />
 
       {/* Native-style fixed bottom navigation + install FAB, portaled to <body> so no transformed
-          ancestor (e.g. the app-entrance wrapper in main.tsx or Framer view transitions) can make
-          `position: fixed` scroll away with the page. They stay pinned to the viewport. */}
-      {createPortal(
+          ancestor can make `position: fixed` scroll away. Hidden while the auth modal is open so it
+          never overlaps/obsures the sign-in/up form or its validation button. */}
+      {!showAuthModal && createPortal(
         <>
           <BottomNav
             lang={lang}
@@ -2838,7 +2838,7 @@ export default function App() {
 
       {/* Combined Sign In / Sign Up Modal */}
       {showAuthModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto p-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto overscroll-contain p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 border border-amber-100 shadow-xl space-y-5 relative mx-auto my-6 sm:my-10">
             <button
               onClick={() => {

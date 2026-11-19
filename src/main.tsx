@@ -36,6 +36,11 @@ function Root() {
   });
   // Once the splash is gone (or skipped), mark the session and play the app entrance.
   const [appEntered, setAppEntered] = useState(!showSplash);
+  // Once the entrance transition finishes we drop the transform entirely (`none`). A non-none
+  // transform creates a stacking context that would trap fixed modals (z-50) *below* the portaled
+  // bottom nav (z-40) — which is exactly what made the sign-in/up modal sit under the nav. With
+  // `transform: none` after the intro, modals layer correctly above the nav.
+  const [introDone, setIntroDone] = useState(!showSplash);
   const isMedian = isMedianApp();
 
   useEffect(() => {
@@ -50,6 +55,8 @@ function Root() {
     // Next frame: trigger the app's coordinated entrance so it animates in sync with the
     // splash's exit rather than appearing statically underneath.
     requestAnimationFrame(() => setAppEntered(true));
+    // Drop the transform shortly after the entrance so the stacking context is gone.
+    setTimeout(() => setIntroDone(true), 650);
   };
 
   return (
@@ -58,7 +65,7 @@ function Root() {
         className="min-h-screen"
         style={{
           opacity: appEntered ? 1 : 0,
-          transform: appEntered ? 'scale(1)' : 'scale(0.985)',
+          transform: !appEntered ? 'scale(0.985)' : introDone ? 'none' : 'scale(1)',
           transition: 'opacity 500ms cubic-bezier(0.22,1,0.36,1), transform 500ms cubic-bezier(0.22,1,0.36,1)',
         }}
       >
