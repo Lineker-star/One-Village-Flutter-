@@ -519,12 +519,12 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
           <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0 text-amber-600" />
           <div>
             <p className="font-bold">
-              {lang === "fr" ? "IA temporairement hors ligne" : "AI temporarily offline"}
+              {lang === "fr" ? "Service temporairement indisponible" : "Service temporarily unavailable"}
             </p>
             <p className="text-amber-800/80">
               {lang === "fr"
-                ? "Le service de génération IA n'est pas configuré sur ce serveur (GEMINI_API_KEY manquant). Vous pouvez quand même utiliser le traducteur de phrases locales ci-dessous."
-                : "The AI generation service is not configured on this server (missing GEMINI_API_KEY). You can still use the local phrase translator below."}
+                ? "L'assistant est momentanément hors ligne. Réessayez dans un instant."
+                : "The assistant is temporarily offline. Please try again shortly."}
             </p>
           </div>
         </div>
@@ -532,7 +532,7 @@ export default function AIGuide({ onApplyPolishedDescription, lang }: AIGuidePro
       {aiAvailable === null && (
         <div className="mb-5 flex items-center gap-2 text-xs text-amber-700/70">
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          {lang === "fr" ? "Vérification de la disponibilité de l'IA..." : "Checking AI availability..."}
+          {lang === "fr" ? "Vérification de la disponibilité..." : "Checking availability..."}
         </div>
       )}
       <div className="flex items-start justify-between gap-4 mb-5">

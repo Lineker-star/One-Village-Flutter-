@@ -475,16 +475,12 @@ const chats: Record<string, any[]> = {
 
 // Health Check
 app.get("/api/health", (req, res) => {
-  // Reports ONLY booleans (never the secret values) so we can verify from the browser whether
-  // the runtime actually sees each server-side key — the fastest way to diagnose "the AI keeps
-  // using the fallback" without exposing anything sensitive.
+  // Reports ONLY generic booleans (never provider/model names or secret values), so the
+  // underlying AI infrastructure stays fully anonymous to the client.
+  const aiConfigured = !!(process.env.GEMINI_API_KEY || process.env.COARENA_API_KEY);
   res.json({
     status: "ok",
-    ai: {
-      gemini: !!process.env.GEMINI_API_KEY,
-      coarena: !!process.env.COARENA_API_KEY,
-      coarenaUrl: !!process.env.COARENA_URL,
-    },
+    ai: aiConfigured,
     supabase: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
   });
 });
@@ -1149,41 +1145,42 @@ app.post("/api/chat", async (req, res) => {
           config: { systemInstruction, temperature: 0.7 },
         }, `chat:${model}`);
         if (response.text) {
-          return res.json({ reply: response.text, provider: "gemini", model, conversationId: sid });
+          return res.json({ reply: response.text, conversationId: sid });
         }
         geminiError = `${model}: empty response`;
       } catch (err: any) {
         const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
-        // Capture a short, non-sensitive reason so the client/diagnostics can show WHY we fell back.
+        // Internal-only reason (logged server-side, never sent to the client) so provider/model
+        // names stay anonymous to users.
         geminiError = `${model} ${mode}: ${String(err?.status ?? "")} ${String(err?.message || err).slice(0, 160)}`;
-        console.warn(`[chat] Gemini ${model} failed — ${geminiError}.`);
+        console.warn(`[chat] Primary model ${model} failed — ${geminiError}.`);
         // Only try the next model for transient/capacity errors; a hard auth error (401/403) won't
-        // be fixed by switching models, so stop early and fall back to Coarena.
+        // be fixed by switching models, so stop early and fall back.
         if (err?.status === 401 || err?.status === 403) break;
         continue;
       }
     }
   } else {
-    geminiError = "GEMINI_API_KEY not set";
-    console.warn("[chat] GEMINI_API_KEY not set; using Coarena directly.");
+    geminiError = "primary key not set";
+    console.warn("[chat] Primary AI key not set; using fallback directly.");
   }
 
-  // --- FALLBACK: Coarena (OpenAI-compatible, multi-turn) ---
+  // --- FALLBACK (secondary provider, anonymous to the client) ---
   if (getCoarenaConfig()) {
     try {
       const reply = await generateWithCoarena(turns, systemInstruction, "chat");
-      return res.json({ reply, provider: "coarena", conversationId: sid, geminiError });
+      return res.json({ reply, conversationId: sid });
     } catch (err: any) {
-      console.error(`[chat] Coarena fallback failed — ${err?.message || err}`);
-      return res.status(502).json({ error: "Both AI providers failed.", provider: "none", geminiError, coarenaError: String(err?.message || err).slice(0, 200) });
+      console.error(`[chat] Fallback provider failed — ${err?.message || err}`);
+      return res.status(502).json({ error: "Le service est momentanément indisponible.", conversationId: sid });
     }
   }
 
-  // --- Both providers unavailable: honest offline message (client keeps its UI usable) ---
+  // --- Both providers unavailable: generic offline message (client keeps its UI usable) ---
   const offline = effectiveLang === "en"
     ? "I'm temporarily offline right now. Please try again in a moment."
     : "Je suis temporairement hors ligne. Réessayez dans un instant.";
-  return res.status(503).json({ error: offline, provider: "none", conversationId: sid });
+  return res.status(503).json({ error: offline, conversationId: sid });
 });
 
 // --- Streaming chat (SSE) for real-time, low-latency responses ---------------------------
@@ -1252,37 +1249,37 @@ app.post("/api/chat/stream", async (req, res) => {
           if (t) { send({ delta: t }); emitted = true; }
         }
         if (emitted) {
-          send({ done: true, provider: "gemini", model, conversationId: sid });
+          send({ done: true, conversationId: sid });
           return res.end();
         }
       } catch (err: any) {
         if (emitted) {
           // Already streamed part of this model's answer — finish gracefully rather than
           // restarting mid-message (which would duplicate text).
-          send({ done: true, provider: "gemini", model, conversationId: sid, warning: "stream interrupted" });
+          send({ done: true, conversationId: sid });
           return res.end();
         }
-        console.warn(`[chat/stream] Gemini ${model} failed before first token — ${err?.status ?? ""} ${String(err?.message || err).slice(0, 140)}`);
+        console.warn(`[chat/stream] Primary model ${model} failed before first token — ${err?.status ?? ""} ${String(err?.message || err).slice(0, 140)}`);
         if (err?.status === 401 || err?.status === 403) break;
         continue;
       }
     }
   }
 
-  // --- Fallback: Coarena (non-streamed, sent as a single delta) ---
+  // --- Fallback (secondary provider, streamed if possible, anonymous to the client) ---
   if (getCoarenaConfig()) {
     try {
       const reply = await generateWithCoarena(turns, systemInstruction, "chat/stream");
       send({ delta: reply });
-      send({ done: true, provider: "coarena", conversationId: sid });
+      send({ done: true, conversationId: sid });
       return res.end();
     } catch (err: any) {
-      console.error(`[chat/stream] Coarena fallback failed — ${err?.message || err}`);
+      console.error(`[chat/stream] Fallback provider failed — ${err?.message || err}`);
     }
   }
 
   const offline = effectiveLang === "en" ? "I'm temporarily offline. Try again shortly." : "Je suis temporairement hors ligne. Réessayez sous peu.";
-  send({ error: offline, provider: "none" });
+  send({ error: offline });
   res.end();
 });
 
@@ -1330,11 +1327,11 @@ app.post("/api/ai-vision", async (req, res) => {
         config: { systemInstruction, temperature: 0.5 },
       }, `vision:${model}`);
       if (response.text) {
-        return res.json({ text: response.text, provider: "gemini", model });
+        return res.json({ text: response.text });
       }
     } catch (err: any) {
       const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
-      console.warn(`[ai-vision] Gemini ${model} failed — ${mode}: ${String(err?.message || err).slice(0, 140)}`);
+      console.warn(`[ai-vision] Primary model ${model} failed — ${mode}: ${String(err?.message || err).slice(0, 140)}`);
       if (err?.status === 401 || err?.status === 403) break;
       continue;
     }
@@ -1363,10 +1360,10 @@ app.post("/api/ai-vision", async (req, res) => {
       if (resp.ok) {
         const data: any = await resp.json();
         const text = data?.choices?.[0]?.message?.content;
-        if (text) return res.json({ text, provider: "coarena", model: coarena.model });
+        if (text) return res.json({ text });
       }
     } catch (err: any) {
-      console.error(`[ai-vision] Coarena failed — ${err?.message || err}`);
+      console.error(`[ai-vision] Fallback failed — ${err?.message || err}`);
     }
   }
 
