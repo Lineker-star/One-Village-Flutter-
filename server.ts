@@ -475,7 +475,18 @@ const chats: Record<string, any[]> = {
 
 // Health Check
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+  // Reports ONLY booleans (never the secret values) so we can verify from the browser whether
+  // the runtime actually sees each server-side key — the fastest way to diagnose "the AI keeps
+  // using the fallback" without exposing anything sensitive.
+  res.json({
+    status: "ok",
+    ai: {
+      gemini: !!process.env.GEMINI_API_KEY,
+      coarena: !!process.env.COARENA_API_KEY,
+      coarenaUrl: !!process.env.COARENA_URL,
+    },
+    supabase: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  });
 });
 
 // Providers list & registration
