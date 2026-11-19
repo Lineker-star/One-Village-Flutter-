@@ -1047,25 +1047,38 @@ app.post("/api/chat", async (req, res) => {
   const gemini = getGeminiClient();
   let geminiError = "";
   if (gemini) {
-    try {
-      const contents = turns.map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      }));
-      const response = await generateContentWithResilience(gemini, {
-        model: process.env.GEMINI_MODEL || "gemini-3.5-flash",
-        contents,
-        config: { systemInstruction, temperature: 0.7 },
-      }, "chat");
-      if (response.text) {
-        return res.json({ reply: response.text, provider: "gemini", conversationId: sid });
+    // Try a chain of models so a single overloaded/unavailable model (503 "high demand") doesn't
+    // force a fallback to Coarena. Override with GEMINI_MODELS (comma-separated). Each model gets
+    // the same resilience wrapper; the first success wins.
+    const geminiModels = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const contents = turns.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+    for (const model of geminiModels) {
+      try {
+        const response = await generateContentWithResilience(gemini, {
+          model,
+          contents,
+          config: { systemInstruction, temperature: 0.7 },
+        }, `chat:${model}`);
+        if (response.text) {
+          return res.json({ reply: response.text, provider: "gemini", model, conversationId: sid });
+        }
+        geminiError = `${model}: empty response`;
+      } catch (err: any) {
+        const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
+        // Capture a short, non-sensitive reason so the client/diagnostics can show WHY we fell back.
+        geminiError = `${model} ${mode}: ${String(err?.status ?? "")} ${String(err?.message || err).slice(0, 160)}`;
+        console.warn(`[chat] Gemini ${model} failed — ${geminiError}.`);
+        // Only try the next model for transient/capacity errors; a hard auth error (401/403) won't
+        // be fixed by switching models, so stop early and fall back to Coarena.
+        if (err?.status === 401 || err?.status === 403) break;
+        continue;
       }
-      geminiError = "empty response";
-    } catch (err: any) {
-      const mode = isQuotaError(err) ? "QUOTA/429" : err?.code === "TIMEOUT" ? "TIMEOUT" : "ERROR";
-      // Capture a short, non-sensitive reason so the client/diagnostics can show WHY we fell back.
-      geminiError = `${mode}: ${String(err?.status ?? "")} ${String(err?.message || err).slice(0, 200)}`;
-      console.warn(`[chat] Gemini failed — ${geminiError}. Trying Coarena fallback.`);
     }
   } else {
     geminiError = "GEMINI_API_KEY not set";
